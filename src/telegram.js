@@ -35,7 +35,7 @@ const MIME_TO_EXT = {
 
 const EXT_TO_MIME = Object.fromEntries(Object.entries(MIME_TO_EXT).map(([k, v]) => [v, k]));
 
-const DOWNLOAD_TIMEOUT = 300_000; // 5 minutes
+const DOWNLOAD_TIMEOUT = parseInt(process.env.DOWNLOAD_TIMEOUT) || 300_000;
 
 export async function fetchMedia(channel, messageId) {
   const tg = await connect();
@@ -76,7 +76,18 @@ export async function fetchMedia(channel, messageId) {
     return null;
   }
 
-    const buffer = await tg.downloadMedia(msg);
+    let lastLog = 0;
+    const buffer = await tg.downloadMedia(msg, {
+      progressCallback: (downloaded, total) => {
+        const now = Date.now();
+        if (now - lastLog < 3000) return; // log every 3s
+        lastLog = now;
+        const pct = total ? ((Number(downloaded) / Number(total)) * 100).toFixed(1) : '?';
+        const mb = (Number(downloaded) / 1048576).toFixed(1);
+        const totalMb = total ? (Number(total) / 1048576).toFixed(1) : '?';
+        console.log(`[telegram] Downloading ${channel}/${messageId}: ${mb}/${totalMb} MB (${pct}%)`);
+      },
+    });
     if (!buffer) return null;
 
     return { buffer: Buffer.from(buffer), type, ext, mime, size: buffer.length };
