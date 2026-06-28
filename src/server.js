@@ -314,9 +314,16 @@ app.get('/dashboard', requireDashboardAuth, async (req, res) => {
   .btn{display:inline-block;padding:6px 14px;border-radius:8px;font-size:12px;font-weight:600;border:none;cursor:pointer;text-decoration:none}
   .btn-warn{background:#422006;color:#facc15;border:1px solid #713f12}
   .btn-warn:hover{background:#713f12}
+  .btn-sm{padding:3px 8px;font-size:11px;border-radius:6px}
+  .btn-retry{background:#1e1b4b;color:#818cf8;border:1px solid #312e81}
+  .btn-retry:hover{background:#312e81}
   .actions{margin-bottom:20px;display:flex;gap:8px}
   .mono{font-family:ui-monospace,monospace;font-size:12px;color:#a1a1aa}
-  .err{color:#f87171;font-size:11px;max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  a.file-link{color:#4ade80;text-decoration:none}
+  a.file-link:hover{text-decoration:underline}
+  .err{color:#f87171;font-size:11px}
+  .err-full{display:none;white-space:pre-wrap;word-break:break-all;padding:6px 0}
+  .err-toggle{color:#f87171;cursor:pointer;text-decoration:underline;font-size:11px}
 </style>
 </head><body>
 <h1>mia dashboard</h1>
@@ -342,16 +349,18 @@ ${Object.entries(channelMap).map(([ch, s]) => `<tr class="ch-row"><td>${ch}</td>
 
 <h2>Recent Jobs</h2>
 <table>
-<tr><th>ID</th><th>Status</th><th>Channel</th><th>Msg</th><th>Type</th><th>Size</th><th>Error</th><th>Created</th></tr>
-${stats.recent.map(r => `<tr>
+<tr><th>ID</th><th>Status</th><th>File</th><th>Channel</th><th>Msg</th><th>Type</th><th>Size</th><th>Error</th><th>Created</th><th></th></tr>
+${stats.recent.map((r, i) => `<tr>
   <td class="mono">${r.id.slice(0,8)}...</td>
   <td><span class="st st-${r.status}">${r.status}</span></td>
+  <td>${r.status === 'ready' && r.ext ? `<a class="file-link" href="/media/${r.id}.${r.ext}" target="_blank">${r.id.slice(0,6)}.${r.ext}</a>` : '-'}</td>
   <td>${r.tg_channel||'-'}</td>
   <td>${r.tg_message_id||'-'}</td>
   <td>${r.type||'-'}</td>
   <td>${r.size ? fmtSize(r.size) : '-'}</td>
-  <td class="err">${r.error||''}</td>
+  <td>${r.error ? `<span class="err-toggle" onclick="var el=document.getElementById('err-${i}');el.style.display=el.style.display==='block'?'none':'block'">${r.error.slice(0,40)}${r.error.length>40?'...':''}</span><div class="err-full" id="err-${i}">${r.error}</div>` : ''}</td>
   <td class="mono">${r.created_at||''}</td>
+  <td>${r.status === 'failed' ? `<form method="POST" action="/dashboard/retry/${r.id}" style="display:inline"><button class="btn btn-sm btn-retry">retry</button></form>` : ''}</td>
 </tr>`).join('')}
 </table>
 
@@ -363,6 +372,11 @@ ${stats.recent.map(r => `<tr>
 app.post('/dashboard/retry-all', requireDashboardAuth, async (req, res) => {
   const count = await requeueAll();
   res.redirect(`/dashboard`);
+});
+
+app.post('/dashboard/retry/:id', requireDashboardAuth, async (req, res) => {
+  await requeue(req.params.id);
+  res.redirect('/dashboard');
 });
 
 // Start worker and server
