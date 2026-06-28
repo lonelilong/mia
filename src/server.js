@@ -3,10 +3,11 @@ import path from 'path';
 import express from 'express';
 import cookieParser from 'cookie-parser';
 import { nanoid } from 'nanoid';
-import { findById, findByTg, findByContentHash, insert, updateReady, requeue, getStats, requeueAll } from './db.js';
+import { findById, findByTg, findByContentHash, insert, updateReady, requeue, getStats, requeueAll, HLS_SIZE_THRESHOLD } from './db.js';
 import { save, read, contentHash } from './storage.js';
 import { EXT_TO_MIME } from './telegram.js';
 import { startWorker } from './worker.js';
+import { startHlsWorker, hlsDir } from './hls-worker.js';
 
 const app = express();
 const PORT = process.env.PORT || 3002;
@@ -42,6 +43,25 @@ app.get('/media/:filename', async (req, res) => {
     'Cache-Control': 'public, max-age=31536000, immutable',
   });
   res.send(buffer);
+});
+
+// ─── HLS streaming — serve m3u8 playlist and .ts segments ──────────────────
+app.get('/hls/:id/index.m3u8', async (req, res) => {
+  const record = await findById(req.params.id);
+  if (!record || record.type !== 'video' || record.status !== 'ready') {
+    return res.status(404).json({ error: 'HLS not available' });
+  }
+  const fp = path.join(hlsDir(record.id), 'index.m3u8');
+  res.set({ 'Content-Type': 'application/vnd.apple.mpegurl', 'Cache-Control': 'public, max-age=31536000, immutable' });
+  res.sendFile(fp, err => { if (err) res.status(404).end(); });
+});
+
+app.get('/hls/:id/:segment', (req, res) => {
+  const { id, segment } = req.params;
+  if (!/^seg\d+\.ts$/.test(segment)) return res.status(400).end();
+  const fp = path.join(hlsDir(id), segment);
+  res.set({ 'Content-Type': 'video/mp2t', 'Cache-Control': 'public, max-age=31536000, immutable' });
+  res.sendFile(fp, err => { if (err) res.status(404).end(); });
 });
 
 // ─── Legacy media fallback — serve old chigua downloads ─────────────────────
@@ -146,12 +166,16 @@ app.get('/status/:id', async (req, res) => {
   if (!record) return res.status(404).json({ error: 'Not found' });
 
   if (record.status === 'ready') {
-    return res.json({
+    const result = {
       ready: true,
       id: record.id,
       url: `/media/${record.id}.${record.ext}`,
       type: record.type,
-    });
+    };
+    if (record.type === 'video' && record.size > HLS_SIZE_THRESHOLD) {
+      result.hls_url = `/hls/${record.id}/index.m3u8`;
+    }
+    return res.json(result);
   }
 
   res.json({
@@ -301,7 +325,7 @@ app.get('/dashboard', requireDashboardAuth, async (req, res) => {
   .card{background:#18181b;border:1px solid #27272a;border-radius:12px;padding:16px}
   .card .label{font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:#71717a;margin-bottom:4px}
   .card .value{font-size:28px;font-weight:700}
-  .queued .value{color:#facc15} .ready .value{color:#4ade80} .failed .value{color:#f87171}
+  .queued .value{color:#facc15} .ready .value{color:#4ade80} .failed .value{color:#f87171} .transcoding .value{color:#818cf8}
   .total .value{color:#fff}
   h2{font-size:14px;font-weight:600;color:#a1a1aa;margin:20px 0 10px;text-transform:uppercase;letter-spacing:.5px}
   table{width:100%;border-collapse:collapse;font-size:13px}
@@ -309,7 +333,7 @@ app.get('/dashboard', requireDashboardAuth, async (req, res) => {
   td{padding:7px 10px;border-bottom:1px solid #18181b}
   tr:hover td{background:#18181b}
   .st{display:inline-block;padding:2px 8px;border-radius:6px;font-size:11px;font-weight:600}
-  .st-queued{background:#422006;color:#facc15} .st-ready{background:#052e16;color:#4ade80} .st-failed{background:#450a0a;color:#f87171}
+  .st-queued{background:#422006;color:#facc15} .st-ready{background:#052e16;color:#4ade80} .st-failed{background:#450a0a;color:#f87171} .st-transcoding{background:#1e1b4b;color:#818cf8}
   .ch-row td{padding:5px 10px}
   .btn{display:inline-block;padding:6px 14px;border-radius:8px;font-size:12px;font-weight:600;border:none;cursor:pointer;text-decoration:none}
   .btn-warn{background:#422006;color:#facc15;border:1px solid #713f12}
@@ -330,6 +354,7 @@ app.get('/dashboard', requireDashboardAuth, async (req, res) => {
 <div class="cards">
   <div class="card total"><div class="label">Total</div><div class="value">${total}</div></div>
   <div class="card queued"><div class="label">Queued</div><div class="value">${countsMap.queued || 0}</div></div>
+  <div class="card transcoding"><div class="label">Transcoding</div><div class="value">${countsMap.transcoding || 0}</div></div>
   <div class="card ready"><div class="label">Ready</div><div class="value">${countsMap.ready || 0}</div></div>
   <div class="card failed"><div class="label">Failed</div><div class="value">${countsMap.failed || 0}</div></div>
   <div class="card"><div class="label">Total Size</div><div class="value" style="font-size:20px">${fmtSize(totalSize)}</div></div>
@@ -379,8 +404,9 @@ app.post('/dashboard/retry/:id', requireDashboardAuth, async (req, res) => {
   res.redirect('/dashboard');
 });
 
-// Start worker and server
+// Start workers and server
 startWorker();
+startHlsWorker();
 
 app.listen(PORT, () => {
   console.log(`[media-server] Listening on :${PORT}`);

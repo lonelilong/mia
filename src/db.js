@@ -75,10 +75,10 @@ export async function insert(record) {
   });
 }
 
-export async function updateReady(id, { type, ext, contentHash, size, mimeType }) {
+export async function updateReady(id, { type, ext, contentHash, size, mimeType, status = 'ready' }) {
   await client.execute({
-    sql: "UPDATE media SET status = 'ready', type = ?, ext = ?, content_hash = ?, size = ?, mime_type = ? WHERE id = ?",
-    args: [type, ext, contentHash, size, mimeType, id],
+    sql: "UPDATE media SET status = ?, type = ?, ext = ?, content_hash = ?, size = ?, mime_type = ? WHERE id = ?",
+    args: [status, type, ext, contentHash, size, mimeType, id],
   });
 }
 
@@ -121,3 +121,21 @@ export async function getQueued(limit = 10) {
   });
   return r.rows;
 }
+
+export async function getTranscoding(limit = 5) {
+  const r = await client.execute({
+    sql: "SELECT * FROM media WHERE status = 'transcoding' ORDER BY created_at ASC LIMIT ?",
+    args: [limit],
+  });
+  return r.rows;
+}
+
+export async function updateStatus(id, status) {
+  await client.execute({
+    sql: 'UPDATE media SET status = ? WHERE id = ?',
+    args: [status, id],
+  });
+}
+
+// Videos larger than this go through HLS transcoding before becoming ready
+export const HLS_SIZE_THRESHOLD = 10 * 1024 * 1024;

@@ -1,4 +1,4 @@
-import { getQueued, updateReady, updateFailed, findByContentHash } from './db.js';
+import { getQueued, updateReady, updateFailed, findByContentHash, HLS_SIZE_THRESHOLD } from './db.js';
 import { save, contentHash } from './storage.js';
 import { fetchMedia } from './telegram.js';
 
@@ -65,12 +65,17 @@ async function processJob(job) {
     }
 
     await save(media.type, job.id, media.ext, media.buffer);
+
+    const needsHls = media.type === 'video' && media.size > HLS_SIZE_THRESHOLD;
     await updateReady(job.id, {
       type: media.type, ext: media.ext,
       contentHash: hash, size: media.size, mimeType: media.mime,
+      status: needsHls ? 'transcoding' : 'ready',
     });
-    console.log(`[worker] ${job.id} ready (${media.type} ${media.size} bytes)`);
-    await notifyReady({ ...job, type: media.type, ext: media.ext });
+    console.log(`[worker] ${job.id} ${needsHls ? 'transcoding' : 'ready'} (${media.type} ${media.size} bytes)`);
+    if (!needsHls) {
+      await notifyReady({ ...job, type: media.type, ext: media.ext });
+    }
   } catch (err) {
     console.error(`[worker] ${job.id} failed:`, err.message);
     await updateFailed(job.id, err.message);
