@@ -378,7 +378,7 @@ ${Object.entries(channelMap).map(([ch, s]) => `<tr class="ch-row"><td>${ch}</td>
 ${stats.recent.map((r, i) => `<tr>
   <td class="mono">${r.id.slice(0,8)}...</td>
   <td><span class="st st-${r.status}">${r.status}</span></td>
-  <td>${r.status === 'ready' && r.ext ? `<a class="file-link" href="/media/${r.id}.${r.ext}" target="_blank">${r.id.slice(0,6)}.${r.ext}</a>` : '-'}</td>
+  <td>${r.status === 'ready' && r.ext ? (r.type === 'video' && r.size > ${HLS_SIZE_THRESHOLD} ? `<a class="file-link" href="/hls/${r.id}/index.m3u8" target="_blank">${r.id.slice(0,6)}.m3u8</a>` : `<a class="file-link" href="/media/${r.id}.${r.ext}" target="_blank">${r.id.slice(0,6)}.${r.ext}</a>`) : '-'}</td>
   <td>${r.tg_channel||'-'}</td>
   <td>${r.tg_message_id||'-'}</td>
   <td>${r.type||'-'}</td>
