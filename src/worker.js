@@ -31,10 +31,20 @@ async function notifyReady(record) {
   }
 }
 
+// Serialize Telegram downloads — GramJS can't handle concurrent downloadMedia calls
+let downloadQueue = Promise.resolve();
+
+function serializedFetch(channel, messageId) {
+  const result = downloadQueue.then(() => fetchMedia(channel, messageId));
+  // Update the chain regardless of success/failure
+  downloadQueue = result.then(() => {}, () => {});
+  return result;
+}
+
 async function processJob(job) {
   console.log(`[worker] Processing ${job.id} (${job.tg_channel}/${job.tg_message_id})`);
   try {
-    const media = await fetchMedia(job.tg_channel, job.tg_message_id);
+    const media = await serializedFetch(job.tg_channel, job.tg_message_id);
     if (!media) {
       await updateFailed(job.id, 'Media not found on Telegram');
       return;

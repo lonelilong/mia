@@ -89,6 +89,31 @@ export async function updateFailed(id, error) {
   });
 }
 
+export async function requeue(id) {
+  await client.execute({
+    sql: "UPDATE media SET status = 'queued', error = NULL WHERE id = ?",
+    args: [id],
+  });
+}
+
+export async function getStats() {
+  const counts = await client.execute(
+    "SELECT status, COUNT(*) as cnt, COALESCE(SUM(size), 0) as total_size FROM media GROUP BY status"
+  );
+  const recent = await client.execute(
+    "SELECT id, status, type, ext, tg_channel, tg_message_id, size, error, created_at FROM media ORDER BY created_at DESC LIMIT 50"
+  );
+  const byChannel = await client.execute(
+    "SELECT tg_channel, status, COUNT(*) as cnt FROM media WHERE tg_channel IS NOT NULL GROUP BY tg_channel, status ORDER BY tg_channel"
+  );
+  return { counts: counts.rows, recent: recent.rows, byChannel: byChannel.rows };
+}
+
+export async function requeueAll() {
+  const r = await client.execute("UPDATE media SET status = 'queued', error = NULL WHERE status = 'failed'");
+  return r.rowsAffected;
+}
+
 export async function getQueued(limit = 10) {
   const r = await client.execute({
     sql: "SELECT * FROM media WHERE status = 'queued' ORDER BY created_at ASC LIMIT ?",

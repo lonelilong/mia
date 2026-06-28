@@ -13,7 +13,10 @@ class QuietLogger extends Logger {
 let client = null;
 
 export async function connect() {
-  if (client) return client;
+  if (client?.connected) return client;
+  if (client) {
+    try { await client.disconnect(); } catch {}
+  }
   client = new TelegramClient(
     new StringSession(process.env.SESSION_STRING || ''),
     parseInt(process.env.API_ID),
@@ -32,11 +35,18 @@ const MIME_TO_EXT = {
 
 const EXT_TO_MIME = Object.fromEntries(Object.entries(MIME_TO_EXT).map(([k, v]) => [v, k]));
 
+const DOWNLOAD_TIMEOUT = 120_000; // 2 minutes
+
 export async function fetchMedia(channel, messageId) {
   const tg = await connect();
-  const entity = await tg.getEntity(channel);
-  const [msg] = await tg.getMessages(entity, { ids: [messageId] });
-  if (!msg || !msg.media) return null;
+
+  const timeout = (ms) => new Promise((_, reject) =>
+    setTimeout(() => reject(new Error('Telegram download timed out')), ms));
+
+  const doFetch = async () => {
+    const entity = await tg.getEntity(channel);
+    const [msg] = await tg.getMessages(entity, { ids: [messageId] });
+    if (!msg || !msg.media) return null;
 
   const isVideo = msg.media.className === 'MessageMediaDocument' &&
     msg.media.document?.mimeType?.startsWith('video/');
@@ -66,10 +76,13 @@ export async function fetchMedia(channel, messageId) {
     return null;
   }
 
-  const buffer = await tg.downloadMedia(msg);
-  if (!buffer) return null;
+    const buffer = await tg.downloadMedia(msg);
+    if (!buffer) return null;
 
-  return { buffer: Buffer.from(buffer), type, ext, mime, size: buffer.length };
+    return { buffer: Buffer.from(buffer), type, ext, mime, size: buffer.length };
+  };
+
+  return Promise.race([doFetch(), timeout(DOWNLOAD_TIMEOUT)]);
 }
 
 export { EXT_TO_MIME };

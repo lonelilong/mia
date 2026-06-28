@@ -1,0 +1,14 @@
+services:
+  mia:
+    build: .
+    ports:
+      - "3002:3002"
+    env_file: .env
+    environment:
+      LIBSQL_URL: file:/data/media.db
+      DATA_DIR: /data
+      LEGACY_MEDIA_DIR: /legacy
+    volumes:
+      - ./data:/data
+      - ${LEGACY_MEDIA_PATH:-./legacy}:/legacy:ro
+    restart: unless-stopped

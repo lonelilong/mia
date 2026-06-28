@@ -1,7 +1,9 @@
 import 'dotenv/config';
+import path from 'path';
 import express from 'express';
+import cookieParser from 'cookie-parser';
 import { nanoid } from 'nanoid';
-import { findById, findByTg, findByContentHash, insert, updateReady } from './db.js';
+import { findById, findByTg, findByContentHash, insert, updateReady, requeue, getStats, requeueAll } from './db.js';
 import { save, read, contentHash } from './storage.js';
 import { EXT_TO_MIME } from './telegram.js';
 import { startWorker } from './worker.js';
@@ -16,6 +18,7 @@ function requireAuth(req, res, next) {
   res.status(401).json({ error: 'Unauthorized' });
 }
 
+app.use(cookieParser());
 app.use(express.json({ limit: '100mb' }));
 
 // ─── GET /media/:id.ext — serve media file ──────────────────────────────────
@@ -41,6 +44,21 @@ app.get('/media/:filename', async (req, res) => {
   res.send(buffer);
 });
 
+// ─── Legacy media fallback — serve old chigua downloads ─────────────────────
+const LEGACY_MEDIA_DIR = process.env.LEGACY_MEDIA_DIR || '';
+if (LEGACY_MEDIA_DIR) {
+  // Only serve paths that look like files (have an extension)
+  app.get(/^\/[^/]+\/.*\.\w+$/, (req, res, next) => {
+    if (req.path.startsWith('/media/')) return next();
+    const safePath = path.normalize(req.path).replace(/^(\.\.[/\\])+/, '');
+    const fp = path.join(LEGACY_MEDIA_DIR, safePath);
+    if (!fp.startsWith(LEGACY_MEDIA_DIR)) return res.status(403).end();
+    res.sendFile(fp, (err) => {
+      if (err) return next();
+    });
+  });
+}
+
 // ─── POST /fetch — queue Telegram media download ────────────────────────────
 app.post('/fetch', requireAuth, async (req, res) => {
   const { channel, message_id } = req.body;
@@ -59,7 +77,11 @@ app.post('/fetch', requireAuth, async (req, res) => {
         type: existing.type,
       });
     }
-    // Still queued or failed — return current status
+    // Re-queue failed jobs for retry
+    if (existing.status === 'failed') {
+      await requeue(existing.id);
+      return res.json({ ready: false, id: existing.id, status: 'queued' });
+    }
     return res.json({
       ready: false,
       id: existing.id,
@@ -99,10 +121,11 @@ app.post('/fetch-batch', requireAuth, async (req, res) => {
           channel, message_id,
         });
       } else {
+        if (existing.status === 'failed') await requeue(existing.id);
         results.push({
           ready: false,
           id: existing.id,
-          status: existing.status,
+          status: existing.status === 'failed' ? 'queued' : existing.status,
           channel, message_id,
         });
       }
@@ -204,6 +227,142 @@ app.post('/upload', requireAuth, async (req, res) => {
     url: `/media/${id}.${ext}`,
     type,
   });
+});
+
+// ─── Dashboard ──────────────────────────────────────────────────────────────
+const DASHBOARD_PASSWORD = process.env.DASHBOARD_PASSWORD || AUTH_TOKEN || 'admin';
+
+app.get('/dashboard/login', (req, res) => {
+  res.type('html').send(`<!DOCTYPE html>
+<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>mia login</title>
+<style>*{margin:0;padding:0;box-sizing:border-box}body{font-family:-apple-system,system-ui,sans-serif;background:#0a0a0a;color:#e4e4e7;display:flex;align-items:center;justify-content:center;min-height:100vh}
+form{background:#18181b;border:1px solid #27272a;border-radius:12px;padding:32px;width:300px}
+h1{font-size:18px;margin-bottom:16px;color:#fff}
+input{width:100%;padding:10px;border-radius:8px;border:1px solid #27272a;background:#0a0a0a;color:#fff;font-size:14px;margin-bottom:12px}
+button{width:100%;padding:10px;border-radius:8px;border:none;background:#fff;color:#000;font-size:14px;font-weight:600;cursor:pointer}
+button:hover{background:#e4e4e7}
+.err{color:#f87171;font-size:13px;margin-bottom:8px}
+</style></head><body>
+<form method="POST" action="/dashboard/login">
+<h1>mia dashboard</h1>
+${req.query.err ? '<div class="err">Wrong password</div>' : ''}
+<input type="password" name="password" placeholder="Password" autofocus>
+<button type="submit">Login</button>
+</form></body></html>`);
+});
+
+app.post('/dashboard/login', express.urlencoded({ extended: false }), (req, res) => {
+  if (req.body.password === DASHBOARD_PASSWORD) {
+    res.cookie('mia_token', DASHBOARD_PASSWORD, { httpOnly: true, maxAge: 86400000 });
+    return res.redirect('/dashboard');
+  }
+  res.redirect('/dashboard/login?err=1');
+});
+
+function requireDashboardAuth(req, res, next) {
+  if (req.cookies?.mia_token === DASHBOARD_PASSWORD) return next();
+  res.redirect('/dashboard/login');
+}
+
+app.get('/dashboard', requireDashboardAuth, async (req, res) => {
+  const stats = await getStats();
+  const countsMap = {};
+  let totalSize = 0;
+  for (const r of stats.counts) {
+    countsMap[r.status] = r.cnt;
+    totalSize += Number(r.total_size);
+  }
+  const total = Object.values(countsMap).reduce((a, b) => a + b, 0);
+
+  const channelMap = {};
+  for (const r of stats.byChannel) {
+    if (!channelMap[r.tg_channel]) channelMap[r.tg_channel] = {};
+    channelMap[r.tg_channel][r.status] = r.cnt;
+  }
+
+  const fmtSize = (b) => {
+    if (!b) return '0';
+    if (b < 1024) return b + ' B';
+    if (b < 1048576) return (b / 1024).toFixed(1) + ' KB';
+    if (b < 1073741824) return (b / 1048576).toFixed(1) + ' MB';
+    return (b / 1073741824).toFixed(2) + ' GB';
+  };
+
+  const html = `<!DOCTYPE html>
+<html><head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>mia dashboard</title>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  body{font-family:-apple-system,system-ui,sans-serif;background:#0a0a0a;color:#e4e4e7;padding:24px;max-width:900px;margin:0 auto}
+  h1{font-size:20px;font-weight:700;margin-bottom:20px;color:#fff}
+  .cards{display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:12px;margin-bottom:24px}
+  .card{background:#18181b;border:1px solid #27272a;border-radius:12px;padding:16px}
+  .card .label{font-size:11px;text-transform:uppercase;letter-spacing:.5px;color:#71717a;margin-bottom:4px}
+  .card .value{font-size:28px;font-weight:700}
+  .queued .value{color:#facc15} .ready .value{color:#4ade80} .failed .value{color:#f87171}
+  .total .value{color:#fff}
+  h2{font-size:14px;font-weight:600;color:#a1a1aa;margin:20px 0 10px;text-transform:uppercase;letter-spacing:.5px}
+  table{width:100%;border-collapse:collapse;font-size:13px}
+  th{text-align:left;padding:8px 10px;border-bottom:1px solid #27272a;color:#71717a;font-weight:500}
+  td{padding:7px 10px;border-bottom:1px solid #18181b}
+  tr:hover td{background:#18181b}
+  .st{display:inline-block;padding:2px 8px;border-radius:6px;font-size:11px;font-weight:600}
+  .st-queued{background:#422006;color:#facc15} .st-ready{background:#052e16;color:#4ade80} .st-failed{background:#450a0a;color:#f87171}
+  .ch-row td{padding:5px 10px}
+  .btn{display:inline-block;padding:6px 14px;border-radius:8px;font-size:12px;font-weight:600;border:none;cursor:pointer;text-decoration:none}
+  .btn-warn{background:#422006;color:#facc15;border:1px solid #713f12}
+  .btn-warn:hover{background:#713f12}
+  .actions{margin-bottom:20px;display:flex;gap:8px}
+  .mono{font-family:ui-monospace,monospace;font-size:12px;color:#a1a1aa}
+  .err{color:#f87171;font-size:11px;max-width:300px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+</style>
+</head><body>
+<h1>mia dashboard</h1>
+<div class="cards">
+  <div class="card total"><div class="label">Total</div><div class="value">${total}</div></div>
+  <div class="card queued"><div class="label">Queued</div><div class="value">${countsMap.queued || 0}</div></div>
+  <div class="card ready"><div class="label">Ready</div><div class="value">${countsMap.ready || 0}</div></div>
+  <div class="card failed"><div class="label">Failed</div><div class="value">${countsMap.failed || 0}</div></div>
+  <div class="card"><div class="label">Total Size</div><div class="value" style="font-size:20px">${fmtSize(totalSize)}</div></div>
+</div>
+
+<div class="actions">
+  <form method="POST" action="/dashboard/retry-all" style="display:inline">
+    <button class="btn btn-warn" onclick="return confirm('Retry all failed jobs?')">Retry All Failed</button>
+  </form>
+</div>
+
+<h2>By Channel</h2>
+<table>
+<tr><th>Channel</th><th>Queued</th><th>Ready</th><th>Failed</th></tr>
+${Object.entries(channelMap).map(([ch, s]) => `<tr class="ch-row"><td>${ch}</td><td>${s.queued||0}</td><td>${s.ready||0}</td><td>${s.failed||0}</td></tr>`).join('')}
+</table>
+
+<h2>Recent Jobs</h2>
+<table>
+<tr><th>ID</th><th>Status</th><th>Channel</th><th>Msg</th><th>Type</th><th>Size</th><th>Error</th><th>Created</th></tr>
+${stats.recent.map(r => `<tr>
+  <td class="mono">${r.id.slice(0,8)}...</td>
+  <td><span class="st st-${r.status}">${r.status}</span></td>
+  <td>${r.tg_channel||'-'}</td>
+  <td>${r.tg_message_id||'-'}</td>
+  <td>${r.type||'-'}</td>
+  <td>${r.size ? fmtSize(r.size) : '-'}</td>
+  <td class="err">${r.error||''}</td>
+  <td class="mono">${r.created_at||''}</td>
+</tr>`).join('')}
+</table>
+
+<script>setTimeout(()=>location.reload(), 10000)</script>
+</body></html>`;
+  res.type('html').send(html);
+});
+
+app.post('/dashboard/retry-all', requireDashboardAuth, async (req, res) => {
+  const count = await requeueAll();
+  res.redirect(`/dashboard`);
 });
 
 // Start worker and server

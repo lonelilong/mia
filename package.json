@@ -8,10 +8,11 @@
   },
   "dependencies": {
     "@libsql/client": "^0.15.0",
+    "big-integer": "^1.6.52",
+    "cookie-parser": "^1.4.7",
     "dotenv": "^16.5.0",
     "express": "^5.1.0",
     "nanoid": "^5.1.5",
-    "telegram": "^2.26.21",
-    "big-integer": "^1.6.52"
+    "telegram": "^2.26.21"
   }
 }
