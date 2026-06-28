@@ -35,7 +35,7 @@ const MIME_TO_EXT = {
 
 const EXT_TO_MIME = Object.fromEntries(Object.entries(MIME_TO_EXT).map(([k, v]) => [v, k]));
 
-const DOWNLOAD_TIMEOUT = 120_000; // 2 minutes
+const DOWNLOAD_TIMEOUT = 300_000; // 5 minutes
 
 export async function fetchMedia(channel, messageId) {
   const tg = await connect();
