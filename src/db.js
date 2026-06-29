@@ -82,10 +82,10 @@ export async function updateReady(id, { type, ext, contentHash, size, mimeType, 
   });
 }
 
-export async function updateFailed(id, error) {
+export async function updateFailed(id, error, status = 'failed') {
   await client.execute({
-    sql: "UPDATE media SET status = 'failed', error = ? WHERE id = ?",
-    args: [error, id],
+    sql: "UPDATE media SET status = ?, error = ? WHERE id = ?",
+    args: [status, error, id],
   });
 }
 

@@ -77,8 +77,9 @@ async function processJob(job) {
       await notifyReady({ ...job, type: media.type, ext: media.ext });
     }
   } catch (err) {
-    console.error(`[worker] ${job.id} failed:`, err.message);
-    await updateFailed(job.id, err.message);
+    const status = err.code === 'TOO_LARGE' ? 'too_large' : 'failed';
+    console.error(`[worker] ${job.id} ${status}:`, err.message);
+    await updateFailed(job.id, err.message, status);
   }
 }
 
