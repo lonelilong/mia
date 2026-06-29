@@ -186,6 +186,46 @@ app.get('/status/:id', async (req, res) => {
   });
 });
 
+// ─── POST /status-batch — check status of multiple media by channel+message_id
+app.post('/status-batch', requireAuth, async (req, res) => {
+  const items = req.body;
+  if (!Array.isArray(items) || !items.length) {
+    return res.status(400).json({ error: 'Expected array of {channel, message_id}' });
+  }
+
+  const results = [];
+  for (const { channel, message_id } of items) {
+    const record = await findByTg(channel, message_id);
+    if (!record) {
+      results.push({ channel, message_id, status: 'unknown' });
+      continue;
+    }
+    if (record.status === 'ready') {
+      const result = {
+        ready: true,
+        id: record.id,
+        url: `/media/${record.id}.${record.ext}`,
+        type: record.type,
+        channel, message_id,
+      };
+      if (record.type === 'video' && record.size > HLS_SIZE_THRESHOLD) {
+        result.hls_url = `/hls/${record.id}/index.m3u8`;
+      }
+      results.push(result);
+    } else {
+      results.push({
+        ready: false,
+        id: record.id,
+        status: record.status,
+        error: record.error || undefined,
+        channel, message_id,
+      });
+    }
+  }
+
+  res.json(results);
+});
+
 // ─── POST /upload — upload media file ────────────────────────────────────────
 app.post('/upload', requireAuth, async (req, res) => {
   const contentType = req.headers['content-type'] || '';
