@@ -17,6 +17,7 @@ await client.execute(`
     size        INTEGER,
     mime_type   TEXT,
     error       TEXT,
+    force       INTEGER DEFAULT 0,
     created_at  DATETIME DEFAULT CURRENT_TIMESTAMP
   )
 `);
@@ -64,13 +65,14 @@ export async function findById(id) {
 
 export async function insert(record) {
   await client.execute({
-    sql: `INSERT INTO media (id, status, type, ext, source, tg_channel, tg_message_id, content_hash, size, mime_type)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    sql: `INSERT INTO media (id, status, type, ext, source, tg_channel, tg_message_id, content_hash, size, mime_type, force)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     args: [
       record.id, record.status || 'queued',
       record.type || null, record.ext || null, record.source,
       record.tg_channel || null, record.tg_message_id || null,
       record.content_hash || null, record.size || null, record.mime_type || null,
+      record.force || 0,
     ],
   });
 }
@@ -89,11 +91,11 @@ export async function updateFailed(id, error, status = 'failed') {
   });
 }
 
-export async function requeue(id) {
-  await client.execute({
-    sql: "UPDATE media SET status = 'queued', error = NULL WHERE id = ?",
-    args: [id],
-  });
+export async function requeue(id, { force } = {}) {
+  const sql = force
+    ? "UPDATE media SET status = 'queued', error = NULL, force = 1 WHERE id = ?"
+    : "UPDATE media SET status = 'queued', error = NULL WHERE id = ?";
+  await client.execute({ sql, args: [id] });
 }
 
 export async function getStats() {

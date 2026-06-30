@@ -38,7 +38,7 @@ const EXT_TO_MIME = Object.fromEntries(Object.entries(MIME_TO_EXT).map(([k, v]) 
 const DOWNLOAD_TIMEOUT = parseInt(process.env.DOWNLOAD_TIMEOUT) || 300_000;
 const MAX_FILE_SIZE = parseInt(process.env.MAX_FILE_SIZE) || 200 * 1024 * 1024; // 200MB
 
-export async function fetchMedia(channel, messageId) {
+export async function fetchMedia(channel, messageId, { force = false } = {}) {
   const tg = await connect();
 
   const timeout = (ms) => new Promise((_, reject) =>
@@ -77,7 +77,7 @@ export async function fetchMedia(channel, messageId) {
     return null;
   }
 
-    if (size > MAX_FILE_SIZE) {
+    if (!force && size > MAX_FILE_SIZE) {
       const mb = (size / 1048576).toFixed(1);
       const err = new Error(`File too large: ${mb}MB exceeds ${MAX_FILE_SIZE / 1048576}MB limit`);
       err.code = 'TOO_LARGE';

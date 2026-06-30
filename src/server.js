@@ -81,7 +81,7 @@ if (LEGACY_MEDIA_DIR) {
 
 // ─── POST /fetch — queue Telegram media download ────────────────────────────
 app.post('/fetch', requireAuth, async (req, res) => {
-  const { channel, message_id } = req.body;
+  const { channel, message_id, force } = req.body;
   if (!channel || !message_id) {
     return res.status(400).json({ error: 'channel and message_id required' });
   }
@@ -98,8 +98,8 @@ app.post('/fetch', requireAuth, async (req, res) => {
       });
     }
     // Re-queue failed jobs for retry
-    if (existing.status === 'failed') {
-      await requeue(existing.id);
+    if (existing.status === 'failed' || existing.status === 'too_large') {
+      await requeue(existing.id, { force });
       return res.json({ ready: false, id: existing.id, status: 'queued' });
     }
     return res.json({
@@ -111,7 +111,7 @@ app.post('/fetch', requireAuth, async (req, res) => {
 
   // Queue for background download
   const id = nanoid();
-  await insert({ id, source: 'telegram', tg_channel: channel, tg_message_id: message_id });
+  await insert({ id, source: 'telegram', tg_channel: channel, tg_message_id: message_id, force: force ? 1 : 0 });
 
   res.json({ ready: false, id, status: 'queued' });
 });
