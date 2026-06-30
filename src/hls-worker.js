@@ -15,6 +15,18 @@ function hlsDir(id) {
   return path.join(DATA_DIR, 'hls', id.slice(0, 2), id.slice(2, 4), id);
 }
 
+async function probeCodec(src) {
+  try {
+    const { stdout } = await execFileAsync('ffprobe', [
+      '-v', 'error', '-select_streams', 'v:0',
+      '-show_entries', 'stream=codec_name', '-of', 'csv=p=0', src,
+    ], { timeout: 10_000 });
+    return stdout.trim();
+  } catch {
+    return 'unknown';
+  }
+}
+
 async function transcode(job) {
   const src = getPath('video', job.id, job.ext);
   const outDir = hlsDir(job.id);
@@ -22,12 +34,20 @@ async function transcode(job) {
 
   const playlist = path.join(outDir, 'index.m3u8');
 
-  console.log(`[hls] Transcoding ${job.id} (${(job.size / 1048576).toFixed(1)} MB)`);
+  const codec = await probeCodec(src);
+  const needsReencode = codec !== 'h264';
+
+  console.log(`[hls] Transcoding ${job.id} (${(job.size / 1048576).toFixed(1)} MB) codec=${codec} reencode=${needsReencode}`);
+
+  const videoArgs = needsReencode
+    ? ['-c:v', 'libx264', '-preset', 'fast', '-crf', '23']
+    : ['-c:v', 'copy'];
 
   try {
     await execFileAsync('ffmpeg', [
       '-i', src,
-      '-codec', 'copy',
+      ...videoArgs,
+      '-c:a', 'aac',
       '-start_number', '0',
       '-hls_time', '6',
       '-hls_list_size', '0',
@@ -35,7 +55,7 @@ async function transcode(job) {
       '-f', 'hls',
       '-y',
       playlist,
-    ], { timeout: 300_000 }); // 5 min timeout
+    ], { timeout: 600_000 }); // 10 min timeout for re-encoding
 
     await updateStatus(job.id, 'ready');
     console.log(`[hls] ${job.id} ready`);
