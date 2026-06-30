@@ -12,6 +12,7 @@ import { startHlsWorker, hlsDir } from './hls-worker.js';
 const app = express();
 const PORT = process.env.PORT || 3002;
 const AUTH_TOKEN = process.env.AUTH_TOKEN || '';
+const CDN_BASE = (process.env.CDN_URL || '').replace(/\/+$/, '');
 
 function requireAuth(req, res, next) {
   const token = req.headers.authorization?.replace('Bearer ', '');
@@ -418,7 +419,7 @@ ${Object.entries(channelMap).map(([ch, s]) => `<tr class="ch-row"><td>${ch}</td>
 ${stats.recent.map((r, i) => `<tr>
   <td class="mono">${r.id.slice(0,8)}...</td>
   <td><span class="st st-${r.status}">${r.status}</span></td>
-  <td>${r.status === 'ready' && r.ext ? (r.type === 'video' && r.size > HLS_SIZE_THRESHOLD ? '<a class="file-link" href="/hls/' + r.id + '/index.m3u8" target="_blank">' + r.id.slice(0,6) + '.m3u8</a>' : '<a class="file-link" href="/media/' + r.id + '.' + r.ext + '" target="_blank">' + r.id.slice(0,6) + '.' + r.ext + '</a>') : '-'}</td>
+  <td>${r.status === 'ready' && r.ext ? (r.type === 'video' && r.size > HLS_SIZE_THRESHOLD ? '<a class="file-link" href="' + (CDN_BASE || '') + '/hls/' + r.id + '/index.m3u8" target="_blank">' + r.id.slice(0,6) + '.m3u8</a>' : '<a class="file-link" href="' + (CDN_BASE || '') + '/media/' + r.id + '.' + r.ext + '" target="_blank">' + r.id.slice(0,6) + '.' + r.ext + '</a>') : '-'}</td>
   <td>${r.tg_channel||'-'}</td>
   <td>${r.tg_message_id||'-'}</td>
   <td>${r.type||'-'}</td>
