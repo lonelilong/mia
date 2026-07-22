@@ -37,6 +37,10 @@ export async function faststart(src, { timeout = 300_000 } = {}) {
     return true;
   } catch (err) {
     await fs.rm(tmp, { force: true }).catch(() => {});
+    // execFile reports only "Command failed: ffmpeg ..." and hides the actual
+    // diagnostic in stderr, which makes failures impossible to triage.
+    const detail = String(err.stderr || '').trim().split('\n').filter(Boolean).pop();
+    if (detail) err.message = `${detail} (while remuxing ${src})`;
     throw err;
   }
 }
