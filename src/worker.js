@@ -1,5 +1,6 @@
 import { getQueued, updateReady, updateFailed, findByContentHash, HLS_SIZE_THRESHOLD } from './db.js';
 import { save, contentHash } from './storage.js';
+import { faststartStored } from './faststart.js';
 import { fetchMedia } from './telegram.js';
 
 const CALLBACK_URL = process.env.CALLBACK_URL || '';
@@ -65,6 +66,10 @@ async function processJob(job) {
     }
 
     await save(media.type, job.id, media.ext, media.buffer);
+    // Relocate the moov atom before the file is ever served. `contentHash` is
+    // deliberately taken from the original download above, so dedup keys stay
+    // stable across this rewrite.
+    await faststartStored(media.type, job.id, media.ext);
 
     const needsHls = media.type === 'video' && media.size > HLS_SIZE_THRESHOLD;
     await updateReady(job.id, {

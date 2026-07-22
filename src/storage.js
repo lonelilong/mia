@@ -3,7 +3,9 @@ import path from 'path';
 import crypto from 'crypto';
 
 function getDataDir() {
-  return process.env.DATA_DIR || '/data';
+  // Absolute: res.sendFile rejects relative paths, and DATA_DIR is commonly
+  // set to something like ./data outside of Docker.
+  return path.resolve(process.env.DATA_DIR || '/data');
 }
 
 function filePath(type, id, ext) {

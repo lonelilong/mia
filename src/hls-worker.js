@@ -8,6 +8,7 @@ import { getPath } from './storage.js';
 const execFileAsync = promisify(execFile);
 const DATA_DIR = process.env.DATA_DIR || '/data';
 const POLL_INTERVAL = 5000;
+const SEGMENT_SECONDS = 3;
 
 let running = false;
 
@@ -39,8 +40,13 @@ async function transcode(job) {
 
   console.log(`[hls] Transcoding ${job.id} (${(job.size / 1048576).toFixed(1)} MB) codec=${codec} reencode=${needsReencode}`);
 
+  // Short segments start faster: the player only has to pull one segment
+  // before it can begin playing, which dominates startup latency for
+  // short-form video. When re-encoding we can force keyframes to match;
+  // with -c:v copy segments still land on the source's existing keyframes.
   const videoArgs = needsReencode
-    ? ['-c:v', 'libx264', '-preset', 'fast', '-crf', '23']
+    ? ['-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
+       '-force_key_frames', `expr:gte(t,n_forced*${SEGMENT_SECONDS})`]
     : ['-c:v', 'copy'];
 
   try {
@@ -49,7 +55,7 @@ async function transcode(job) {
       ...videoArgs,
       '-c:a', 'aac',
       '-start_number', '0',
-      '-hls_time', '6',
+      '-hls_time', String(SEGMENT_SECONDS),
       '-hls_list_size', '0',
       '-hls_segment_filename', path.join(outDir, 'seg%03d.ts'),
       '-f', 'hls',

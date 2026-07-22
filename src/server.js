@@ -4,7 +4,7 @@ import express from 'express';
 import cookieParser from 'cookie-parser';
 import { nanoid } from 'nanoid';
 import { findById, findByTg, findByContentHash, insert, updateReady, requeue, getStats, requeueAll, HLS_SIZE_THRESHOLD } from './db.js';
-import { save, read, contentHash } from './storage.js';
+import { save, getPath, contentHash } from './storage.js';
 import { EXT_TO_MIME } from './telegram.js';
 import { startWorker } from './worker.js';
 import { startHlsWorker, hlsDir } from './hls-worker.js';
@@ -13,6 +13,11 @@ const app = express();
 const PORT = process.env.PORT || 3002;
 const AUTH_TOKEN = process.env.AUTH_TOKEN || '';
 const CDN_BASE = (process.env.CDN_URL || '').replace(/\/+$/, '');
+
+// Media is content-addressed (or an immutable archive of a Telegram message),
+// so it can be cached forever. Without this the CDN falls back to its own
+// default TTL and revalidates against us on every play.
+const MEDIA_CACHE_CONTROL = 'public, max-age=31536000, immutable';
 
 function requireAuth(req, res, next) {
   const token = req.headers.authorization?.replace('Bearer ', '');
@@ -34,16 +39,18 @@ app.get('/media/:filename', async (req, res) => {
     return res.status(404).json({ error: 'Not found' });
   }
 
-  const buffer = await read(record.type, id, ext);
-  if (!buffer) return res.status(404).json({ error: 'File not found' });
-
   const mime = record.mime_type || EXT_TO_MIME[ext] || 'application/octet-stream';
-  res.set({
-    'Content-Type': mime,
-    'Content-Length': buffer.length,
-    'Cache-Control': 'public, max-age=31536000, immutable',
+  // Stream from disk rather than reading the whole file into a Buffer: these
+  // are routinely 40 MB+ videos, and a Range request for the first few KB
+  // should not cost a full-file read. sendFile also answers Range with 206,
+  // which is what players need to seek.
+  res.sendFile(getPath(record.type, id, ext), {
+    headers: { 'Content-Type': mime, 'Cache-Control': MEDIA_CACHE_CONTROL },
+  }, (err) => {
+    if (!err) return;
+    if (res.headersSent) return res.end();
+    res.status(404).json({ error: 'File not found' });
   });
-  res.send(buffer);
 });
 
 // ─── HLS streaming — serve m3u8 playlist and .ts segments ──────────────────
@@ -66,16 +73,22 @@ app.get('/hls/:id/:segment', (req, res) => {
 });
 
 // ─── Legacy media fallback — serve old chigua downloads ─────────────────────
-const LEGACY_MEDIA_DIR = process.env.LEGACY_MEDIA_DIR || '';
+const LEGACY_MEDIA_DIR = process.env.LEGACY_MEDIA_DIR
+  ? path.resolve(process.env.LEGACY_MEDIA_DIR)
+  : '';
 if (LEGACY_MEDIA_DIR) {
   // Only serve paths that look like files (have an extension)
   app.get(/^\/[^/]+\/.*\.\w+$/, (req, res, next) => {
     if (req.path.startsWith('/media/')) return next();
     const safePath = path.normalize(req.path).replace(/^(\.\.[/\\])+/, '');
     const fp = path.join(LEGACY_MEDIA_DIR, safePath);
-    if (!fp.startsWith(LEGACY_MEDIA_DIR)) return res.status(403).end();
-    res.sendFile(fp, (err) => {
-      if (err) return next();
+    // Trailing separator matters: a bare prefix check also accepts a sibling
+    // directory whose name merely starts with LEGACY_MEDIA_DIR.
+    if (!fp.startsWith(LEGACY_MEDIA_DIR + path.sep)) return res.status(403).end();
+    res.sendFile(fp, { headers: { 'Cache-Control': MEDIA_CACHE_CONTROL } }, (err) => {
+      if (!err) return;
+      if (res.headersSent) return res.end();
+      next();
     });
   });
 }
