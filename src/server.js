@@ -60,16 +60,28 @@ app.get('/hls/:id/index.m3u8', async (req, res) => {
     return res.status(404).json({ error: 'HLS not available' });
   }
   const fp = path.join(hlsDir(record.id), 'index.m3u8');
-  res.set({ 'Content-Type': 'application/vnd.apple.mpegurl', 'Cache-Control': 'public, max-age=31536000, immutable' });
-  res.sendFile(fp, err => { if (err) res.status(404).end(); });
+  // Headers go through sendFile's options so they are only applied on a
+  // successful transfer — setting them up front made 404s cacheable for a year.
+  res.sendFile(fp, {
+    headers: { 'Content-Type': 'application/vnd.apple.mpegurl', 'Cache-Control': MEDIA_CACHE_CONTROL },
+  }, (err) => {
+    if (!err) return;
+    if (res.headersSent) return res.end();
+    res.status(404).end();
+  });
 });
 
 app.get('/hls/:id/:segment', (req, res) => {
   const { id, segment } = req.params;
   if (!/^seg\d+\.ts$/.test(segment)) return res.status(400).end();
   const fp = path.join(hlsDir(id), segment);
-  res.set({ 'Content-Type': 'video/mp2t', 'Cache-Control': 'public, max-age=31536000, immutable' });
-  res.sendFile(fp, err => { if (err) res.status(404).end(); });
+  res.sendFile(fp, {
+    headers: { 'Content-Type': 'video/mp2t', 'Cache-Control': MEDIA_CACHE_CONTROL },
+  }, (err) => {
+    if (!err) return;
+    if (res.headersSent) return res.end();
+    res.status(404).end();
+  });
 });
 
 // ─── Legacy media fallback — serve old chigua downloads ─────────────────────

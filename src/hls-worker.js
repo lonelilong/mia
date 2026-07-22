@@ -6,7 +6,8 @@ import { getTranscoding, updateStatus, updateFailed } from './db.js';
 import { getPath } from './storage.js';
 
 const execFileAsync = promisify(execFile);
-const DATA_DIR = process.env.DATA_DIR || '/data';
+// Absolute: hlsDir() feeds res.sendFile, which rejects relative paths.
+const DATA_DIR = path.resolve(process.env.DATA_DIR || '/data');
 const POLL_INTERVAL = 5000;
 const SEGMENT_SECONDS = 3;
 
