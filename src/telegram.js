@@ -35,19 +35,16 @@ const MIME_TO_EXT = {
 
 const EXT_TO_MIME = Object.fromEntries(Object.entries(MIME_TO_EXT).map(([k, v]) => [v, k]));
 
-const DOWNLOAD_TIMEOUT = parseInt(process.env.DOWNLOAD_TIMEOUT) || 300_000;
+const MIN_DOWNLOAD_TIMEOUT = parseInt(process.env.DOWNLOAD_TIMEOUT) || 300_000;
+const TIMEOUT_PER_MB = 3_000; // 3s per MB
 const MAX_FILE_SIZE = parseInt(process.env.MAX_FILE_SIZE) || 200 * 1024 * 1024; // 200MB
 
 export async function fetchMedia(channel, messageId, { force = false } = {}) {
   const tg = await connect();
 
-  const timeout = (ms) => new Promise((_, reject) =>
-    setTimeout(() => reject(new Error('Telegram download timed out')), ms));
-
-  const doFetch = async () => {
-    const entity = await tg.getEntity(channel);
-    const [msg] = await tg.getMessages(entity, { ids: [messageId] });
-    if (!msg || !msg.media) return null;
+  const entity = await tg.getEntity(channel);
+  const [msg] = await tg.getMessages(entity, { ids: [messageId] });
+  if (!msg || !msg.media) return null;
 
   const isVideo = msg.media.className === 'MessageMediaDocument' &&
     msg.media.document?.mimeType?.startsWith('video/');
@@ -77,31 +74,36 @@ export async function fetchMedia(channel, messageId, { force = false } = {}) {
     return null;
   }
 
-    if (!force && size > MAX_FILE_SIZE) {
-      const mb = (size / 1048576).toFixed(1);
-      const err = new Error(`File too large: ${mb}MB exceeds ${MAX_FILE_SIZE / 1048576}MB limit`);
-      err.code = 'TOO_LARGE';
-      throw err;
-    }
+  if (!force && size > MAX_FILE_SIZE) {
+    const mb = (size / 1048576).toFixed(1);
+    const err = new Error(`File too large: ${mb}MB exceeds ${MAX_FILE_SIZE / 1048576}MB limit`);
+    err.code = 'TOO_LARGE';
+    throw err;
+  }
 
-    let lastLog = 0;
-    const buffer = await tg.downloadMedia(msg, {
-      progressCallback: (downloaded, total) => {
-        const now = Date.now();
-        if (now - lastLog < 3000) return; // log every 3s
-        lastLog = now;
-        const pct = total ? ((Number(downloaded) / Number(total)) * 100).toFixed(1) : '?';
-        const mb = (Number(downloaded) / 1048576).toFixed(1);
-        const totalMb = total ? (Number(total) / 1048576).toFixed(1) : '?';
-        console.log(`[telegram] Downloading ${channel}/${messageId}: ${mb}/${totalMb} MB (${pct}%)`);
-      },
-    });
-    if (!buffer) return null;
+  // Dynamic timeout: base 5min + 3s per MB
+  const sizeMb = size / 1048576;
+  const dlTimeout = Math.max(MIN_DOWNLOAD_TIMEOUT, Math.round(sizeMb * TIMEOUT_PER_MB));
+  const timeoutPromise = new Promise((_, reject) =>
+    setTimeout(() => reject(new Error(`Telegram download timed out (${Math.round(dlTimeout / 1000)}s for ${sizeMb.toFixed(1)}MB)`)), dlTimeout));
 
-    return { buffer: Buffer.from(buffer), type, ext, mime, size: buffer.length };
-  };
+  let lastLog = 0;
+  const downloadPromise = tg.downloadMedia(msg, {
+    progressCallback: (downloaded, total) => {
+      const now = Date.now();
+      if (now - lastLog < 3000) return;
+      lastLog = now;
+      const pct = total ? ((Number(downloaded) / Number(total)) * 100).toFixed(1) : '?';
+      const mb = (Number(downloaded) / 1048576).toFixed(1);
+      const totalMb = total ? (Number(total) / 1048576).toFixed(1) : '?';
+      console.log(`[telegram] Downloading ${channel}/${messageId}: ${mb}/${totalMb} MB (${pct}%)`);
+    },
+  });
 
-  return Promise.race([doFetch(), timeout(DOWNLOAD_TIMEOUT)]);
+  const buffer = await Promise.race([downloadPromise, timeoutPromise]);
+  if (!buffer) return null;
+
+  return { buffer: Buffer.from(buffer), type, ext, mime, size: buffer.length };
 }
 
 export { EXT_TO_MIME };
