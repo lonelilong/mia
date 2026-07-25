@@ -39,6 +39,26 @@ const MIN_DOWNLOAD_TIMEOUT = parseInt(process.env.DOWNLOAD_TIMEOUT) || 300_000;
 const TIMEOUT_PER_MB = 3_000; // 3s per MB
 const MAX_FILE_SIZE = parseInt(process.env.MAX_FILE_SIZE) || 200 * 1024 * 1024; // 200MB
 
+function parseMediaMeta(msg) {
+  const isVideo = msg.media.className === 'MessageMediaDocument' &&
+    msg.media.document?.mimeType?.startsWith('video/');
+  const isPhoto = msg.media.className === 'MessageMediaPhoto';
+  const isDoc = msg.media.className === 'MessageMediaDocument' && !isVideo;
+
+  if (isVideo) {
+    const mime = msg.media.document.mimeType;
+    return { type: 'video', mime, ext: MIME_TO_EXT[mime] || 'mp4', size: Number(msg.media.document.size ?? 0) };
+  } else if (isPhoto) {
+    const sizes = msg.media.photo.sizes || [];
+    const biggest = sizes[sizes.length - 1];
+    return { type: 'photo', mime: 'image/jpeg', ext: 'jpg', size: biggest?.size || 0 };
+  } else if (isDoc) {
+    const mime = msg.media.document.mimeType || 'application/octet-stream';
+    return { type: 'photo', mime, ext: MIME_TO_EXT[mime] || 'bin', size: Number(msg.media.document.size ?? 0) };
+  }
+  return null;
+}
+
 export async function fetchMedia(channel, messageId, { force = false } = {}) {
   const tg = await connect();
 
@@ -46,33 +66,9 @@ export async function fetchMedia(channel, messageId, { force = false } = {}) {
   const [msg] = await tg.getMessages(entity, { ids: [messageId] });
   if (!msg || !msg.media) return null;
 
-  const isVideo = msg.media.className === 'MessageMediaDocument' &&
-    msg.media.document?.mimeType?.startsWith('video/');
-  const isPhoto = msg.media.className === 'MessageMediaPhoto';
-  const isDoc = msg.media.className === 'MessageMediaDocument' && !isVideo;
-
-  let type, ext, mime, size;
-
-  if (isVideo) {
-    type = 'video';
-    mime = msg.media.document.mimeType;
-    ext = MIME_TO_EXT[mime] || 'mp4';
-    size = Number(msg.media.document.size ?? 0);
-  } else if (isPhoto) {
-    type = 'photo';
-    mime = 'image/jpeg';
-    ext = 'jpg';
-    const sizes = msg.media.photo.sizes || [];
-    const biggest = sizes[sizes.length - 1];
-    size = biggest?.size || 0;
-  } else if (isDoc) {
-    type = 'photo';
-    mime = msg.media.document.mimeType || 'application/octet-stream';
-    ext = MIME_TO_EXT[mime] || 'bin';
-    size = Number(msg.media.document.size ?? 0);
-  } else {
-    return null;
-  }
+  const meta = parseMediaMeta(msg);
+  if (!meta) return null;
+  const { type, ext, mime, size } = meta;
 
   if (!force && size > MAX_FILE_SIZE) {
     const mb = (size / 1048576).toFixed(1);

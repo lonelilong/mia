@@ -107,7 +107,7 @@ if (LEGACY_MEDIA_DIR) {
 
 // ─── POST /fetch — queue Telegram media download ────────────────────────────
 app.post('/fetch', requireAuth, async (req, res) => {
-  const { channel, message_id, force } = req.body;
+  const { channel, message_id, force, type: hintType, size: hintSize, mime_type: hintMime } = req.body;
   if (!channel || !message_id) {
     return res.status(400).json({ error: 'channel and message_id required' });
   }
@@ -137,7 +137,10 @@ app.post('/fetch', requireAuth, async (req, res) => {
 
   // Queue for background download
   const id = nanoid();
-  await insert({ id, source: 'telegram', tg_channel: channel, tg_message_id: message_id, force: force ? 1 : 0 });
+  await insert({
+    id, source: 'telegram', tg_channel: channel, tg_message_id: message_id, force: force ? 1 : 0,
+    type: hintType || null, size: hintSize || null, mime_type: hintMime || null,
+  });
 
   res.json({ ready: false, id, status: 'queued' });
 });
@@ -150,7 +153,7 @@ app.post('/fetch-batch', requireAuth, async (req, res) => {
   }
 
   const results = [];
-  for (const { channel, message_id } of items) {
+  for (const { channel, message_id, type: hintType, size: hintSize, mime_type: hintMime } of items) {
     if (!channel || !message_id) {
       results.push({ channel, message_id, error: 'channel and message_id required' });
       continue;
@@ -179,7 +182,10 @@ app.post('/fetch-batch', requireAuth, async (req, res) => {
     }
 
     const id = nanoid();
-    await insert({ id, source: 'telegram', tg_channel: channel, tg_message_id: message_id });
+    await insert({
+      id, source: 'telegram', tg_channel: channel, tg_message_id: message_id,
+      type: hintType || null, size: hintSize || null, mime_type: hintMime || null,
+    });
     results.push({ ready: false, id, status: 'queued', channel, message_id });
   }
 

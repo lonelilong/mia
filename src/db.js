@@ -118,11 +118,20 @@ export async function requeueAll() {
 
 export async function getQueued(limit = 10) {
   const r = await client.execute({
-    sql: "SELECT * FROM media WHERE status = 'queued' ORDER BY created_at ASC LIMIT ?",
+    sql: `SELECT * FROM media WHERE status = 'queued' ORDER BY
+      CASE
+        WHEN type = 'photo' OR (type IS NOT NULL AND type != 'video') THEN 0
+        WHEN type = 'video' AND size <= 104857600 THEN 1
+        WHEN type = 'video' AND size > 104857600 THEN 2
+        ELSE 3
+      END,
+      created_at ASC
+      LIMIT ?`,
     args: [limit],
   });
   return r.rows;
 }
+
 
 export async function getTranscoding(limit = 5) {
   const r = await client.execute({
