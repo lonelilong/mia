@@ -122,8 +122,9 @@ export async function getQueued(limit = 10) {
       CASE
         WHEN type = 'photo' OR (type IS NOT NULL AND type != 'video') THEN 0
         WHEN type = 'video' AND size <= 104857600 THEN 1
-        WHEN type = 'video' AND size > 104857600 THEN 2
-        ELSE 3
+        WHEN type = 'video' AND size <= 209715200 THEN 2
+        WHEN type = 'video' AND size > 209715200 THEN 3
+        ELSE 4
       END,
       created_at ASC
       LIMIT ?`,
