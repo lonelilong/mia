@@ -2,7 +2,7 @@ import { execFile } from 'child_process';
 import { promisify } from 'util';
 import fs from 'fs/promises';
 import path from 'path';
-import { getTranscoding, updateStatus, updateFailed } from './db.js';
+import { getTranscoding, updateHlsReady, updateHlsFailed } from './db.js';
 import { getPath } from './storage.js';
 
 const execFileAsync = promisify(execFile);
@@ -10,6 +10,12 @@ const execFileAsync = promisify(execFile);
 const DATA_DIR = path.resolve(process.env.DATA_DIR || '/data');
 const POLL_INTERVAL = 5000;
 const SEGMENT_SECONDS = 3;
+// A flat timeout killed anything longer than `budget * encode_speed` of content — in
+// practice every video over ~16 min, and over ~1.5 min for slow HEVC sources. Budget by
+// source duration instead, at a pessimistic 0.15x, with a floor and a ceiling.
+const MIN_TRANSCODE_MS = 10 * 60_000;
+const MAX_TRANSCODE_MS = 6 * 60 * 60_000;
+const SLOWEST_EXPECTED_SPEED = 0.15;
 
 let running = false;
 
@@ -29,6 +35,26 @@ async function probeCodec(src) {
   }
 }
 
+async function probeDuration(src) {
+  try {
+    const { stdout } = await execFileAsync('ffprobe', [
+      '-v', 'error', '-show_entries', 'format=duration',
+      '-of', 'csv=p=0', src,
+    ], { timeout: 10_000 });
+    const seconds = parseFloat(stdout.trim());
+    return Number.isFinite(seconds) ? seconds : 0;
+  } catch {
+    return 0;
+  }
+}
+
+// A stream copy is near-instant regardless of length; only re-encoding needs a real budget.
+function transcodeBudgetMs(durationSeconds, needsReencode) {
+  if (!needsReencode || !durationSeconds) return MIN_TRANSCODE_MS;
+  const needed = (durationSeconds / SLOWEST_EXPECTED_SPEED) * 1000;
+  return Math.min(MAX_TRANSCODE_MS, Math.max(MIN_TRANSCODE_MS, needed));
+}
+
 async function transcode(job) {
   const src = getPath('video', job.id, job.ext);
   const outDir = hlsDir(job.id);
@@ -38,8 +64,10 @@ async function transcode(job) {
 
   const codec = await probeCodec(src);
   const needsReencode = codec !== 'h264';
+  const duration = await probeDuration(src);
+  const budgetMs = transcodeBudgetMs(duration, needsReencode);
 
-  console.log(`[hls] Transcoding ${job.id} (${(job.size / 1048576).toFixed(1)} MB) codec=${codec} reencode=${needsReencode}`);
+  console.log(`[hls] Transcoding ${job.id} (${(job.size / 1048576).toFixed(1)} MB) codec=${codec} reencode=${needsReencode} duration=${duration.toFixed(0)}s budget=${(budgetMs / 60000).toFixed(0)}min`);
 
   // Short segments start faster: the player only has to pull one segment
   // before it can begin playing, which dominates startup latency for
@@ -62,13 +90,15 @@ async function transcode(job) {
       '-f', 'hls',
       '-y',
       playlist,
-    ], { timeout: 600_000 }); // 10 min timeout for re-encoding
+    ], { timeout: budgetMs, maxBuffer: 1024 * 1024 });
 
-    await updateStatus(job.id, 'ready');
-    console.log(`[hls] ${job.id} ready`);
+    await updateHlsReady(job.id);
+    console.log(`[hls] ${job.id} ready (with HLS)`);
   } catch (err) {
-    console.error(`[hls] ${job.id} failed:`, err.message);
-    await updateFailed(job.id, `HLS: ${err.message}`);
+    // The mp4 is already downloaded, faststarted and playable — only the streaming
+    // variant is missing, so the row stays 'ready' and just loses its hls_url.
+    console.error(`[hls] ${job.id} HLS failed, serving mp4 only:`, err.message.slice(0, 200));
+    await updateHlsFailed(job.id, `HLS: ${err.message}`.slice(0, 2000));
     await fs.rm(outDir, { recursive: true, force: true }).catch(() => {});
   }
 }

@@ -22,6 +22,13 @@ await client.execute(`
   )
 `);
 
+// Added after the fact: whether an HLS playlist actually exists for this row, and why it
+// doesn't if it doesn't. Before this, hls_url was inferred from size alone, which lied
+// whenever a transcode failed.
+for (const col of ['hls_ready INTEGER DEFAULT 0', 'hls_error TEXT']) {
+  await client.execute(`ALTER TABLE media ADD COLUMN ${col}`).catch(() => {});
+}
+
 await client.execute(`
   CREATE INDEX IF NOT EXISTS idx_media_tg
   ON media (tg_channel, tg_message_id)
@@ -103,7 +110,7 @@ export async function getStats() {
     "SELECT status, COUNT(*) as cnt, COALESCE(SUM(size), 0) as total_size FROM media GROUP BY status"
   );
   const recent = await client.execute(
-    "SELECT id, status, type, ext, tg_channel, tg_message_id, size, error, created_at FROM media ORDER BY created_at DESC LIMIT 50"
+    "SELECT id, status, type, ext, tg_channel, tg_message_id, size, error, hls_ready, hls_error, created_at FROM media ORDER BY created_at DESC LIMIT 50"
   );
   const byChannel = await client.execute(
     "SELECT tg_channel, status, COUNT(*) as cnt FROM media WHERE tg_channel IS NOT NULL GROUP BY tg_channel, status ORDER BY tg_channel"
@@ -146,6 +153,23 @@ export async function updateStatus(id, status) {
   await client.execute({
     sql: 'UPDATE media SET status = ? WHERE id = ?',
     args: [status, id],
+  });
+}
+
+// HLS is an enhancement, not a gate: the mp4 is already downloaded and playable by the
+// time transcoding runs, so a transcode outcome only ever sets hls_ready — it must never
+// move the row out of 'ready'.
+export async function updateHlsReady(id) {
+  await client.execute({
+    sql: "UPDATE media SET status = 'ready', hls_ready = 1, hls_error = NULL WHERE id = ?",
+    args: [id],
+  });
+}
+
+export async function updateHlsFailed(id, error) {
+  await client.execute({
+    sql: "UPDATE media SET status = 'ready', hls_ready = 0, hls_error = ? WHERE id = ?",
+    args: [error, id],
   });
 }
 
