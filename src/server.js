@@ -5,6 +5,7 @@ import cookieParser from 'cookie-parser';
 import { nanoid } from 'nanoid';
 import { findById, findByTg, findByContentHash, insert, updateReady, requeue, getStats, requeueAll, HLS_SIZE_THRESHOLD } from './db.js';
 import { save, getPath, contentHash } from './storage.js';
+import { faststartStored } from './faststart.js';
 import { EXT_TO_MIME } from './telegram.js';
 import { startWorker } from './worker.js';
 import { startHlsWorker, hlsDir } from './hls-worker.js';
@@ -204,7 +205,7 @@ app.get('/status/:id', async (req, res) => {
       url: `/media/${record.id}.${record.ext}`,
       type: record.type,
     };
-    if (record.type === 'video' && record.size > HLS_SIZE_THRESHOLD) {
+    if (record.type === 'video' && record.hls_ready) {
       result.hls_url = `/hls/${record.id}/index.m3u8`;
     }
     return res.json(result);
@@ -240,7 +241,7 @@ app.post('/status-batch', requireAuth, async (req, res) => {
         type: record.type,
         channel, message_id,
       };
-      if (record.type === 'video' && record.size > HLS_SIZE_THRESHOLD) {
+      if (record.type === 'video' && record.hls_ready) {
         result.hls_url = `/hls/${record.id}/index.m3u8`;
       }
       results.push(result);
@@ -312,16 +313,28 @@ app.post('/upload', requireAuth, async (req, res) => {
 
   const id = nanoid();
   await save(type, id, ext, buffer);
+
+  // Uploads get the same post-processing as Telegram downloads (worker.js): relocate the
+  // moov atom so the file is seekable before it is ever served, then hand large videos to
+  // the HLS worker. Previously uploads were inserted straight as 'ready', so they were
+  // never faststarted and never transcoded.
+  await faststartStored(type, id, ext);
+
+  const needsHls = type === 'video' && buffer.length > HLS_SIZE_THRESHOLD;
   await insert({
-    id, status: 'ready', type, ext, source: 'upload',
+    id, status: needsHls ? 'transcoding' : 'ready', type, ext, source: 'upload',
     content_hash: hash, size: buffer.length, mime_type: mime,
   });
 
+  // `ready` here means "the mp4 is serveable", which is true either way — a transcoding
+  // row already has its file on disk. Callers that need to know whether the streaming
+  // variant exists should look at hls_ready via /status.
   res.json({
-    ready: true,
+    ready: !needsHls,
     id,
     url: `/media/${id}.${ext}`,
     type,
+    status: needsHls ? 'transcoding' : 'ready',
   });
 });
 
@@ -450,7 +463,7 @@ ${Object.entries(channelMap).map(([ch, s]) => `<tr class="ch-row"><td>${ch}</td>
 ${stats.recent.map((r, i) => `<tr>
   <td class="mono">${r.id.slice(0,8)}...</td>
   <td><span class="st st-${r.status}">${r.status}</span></td>
-  <td>${r.status === 'ready' && r.ext ? (r.type === 'video' && r.size > HLS_SIZE_THRESHOLD ? '<a class="file-link" href="' + (CDN_BASE || '') + '/hls/' + r.id + '/index.m3u8" target="_blank">' + r.id.slice(0,6) + '.m3u8</a>' : '<a class="file-link" href="' + (CDN_BASE || '') + '/media/' + r.id + '.' + r.ext + '" target="_blank">' + r.id.slice(0,6) + '.' + r.ext + '</a>') : '-'}</td>
+  <td>${r.status === 'ready' && r.ext ? (r.type === 'video' && r.hls_ready ? '<a class="file-link" href="' + (CDN_BASE || '') + '/hls/' + r.id + '/index.m3u8" target="_blank">' + r.id.slice(0,6) + '.m3u8</a>' : '<a class="file-link" href="' + (CDN_BASE || '') + '/media/' + r.id + '.' + r.ext + '" target="_blank">' + r.id.slice(0,6) + '.' + r.ext + '</a>') : '-'}</td>
   <td>${r.tg_channel||'-'}</td>
   <td>${r.tg_message_id||'-'}</td>
   <td>${r.type||'-'}</td>
