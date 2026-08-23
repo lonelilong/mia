@@ -22,7 +22,7 @@ function safeId(id) {
 
 const dirFor = id => path.join(ROOT(), id);
 
-export async function writePart(uploadId, index, stream) {
+export async function writePart(uploadId, index, stream, maxTotal = Infinity) {
   const id = safeId(uploadId);
   if (!id) throw new Error('invalid upload id');
   if (!Number.isInteger(index) || index < 0 || index > 100000) throw new Error('invalid chunk index');
@@ -32,7 +32,29 @@ export async function writePart(uploadId, index, stream) {
   const part = path.join(dir, String(index).padStart(6, '0'));
   await pipeline(stream, fs.createWriteStream(part));
   const { size } = await fsp.stat(part);
+
+  // Enforced while the upload is still arriving rather than at assembly time, so a caller
+  // cannot stage far more than its ticket allows before being told no.
+  if (Number.isFinite(maxTotal)) {
+    let total = 0;
+    for (const name of await listParts(id)) {
+      total += (await fsp.stat(path.join(dir, name))).size;
+    }
+    if (total > maxTotal) {
+      await discard(id);
+      throw new Error('upload exceeds the size allowed by this ticket');
+    }
+  }
+
   return size;
+}
+
+/** Move staged parts under a new id, so the media row's own id locates its bytes. */
+export async function renameStaging(fromId, toId) {
+  const from = safeId(fromId);
+  const to = safeId(toId);
+  if (!from || !to) throw new Error('invalid upload id');
+  await fsp.rename(dirFor(from), dirFor(to));
 }
 
 export async function listParts(uploadId) {

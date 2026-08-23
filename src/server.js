@@ -7,10 +7,12 @@ import { findById, findByTg, findByContentHash, insert, updateReady, requeue, ge
 import { save, getPath, contentHash } from './storage.js';
 import { faststartStored } from './faststart.js';
 import fsp from 'fs/promises';
-import { writePart, listParts, assembleTo, discard, maybeSweep } from './chunk-store.js';
+import { writePart, listParts, discard, maybeSweep, renameStaging } from './chunk-store.js';
 import { EXT_TO_MIME } from './telegram.js';
+import { verifyTicket } from './tickets.js';
 import { startWorker } from './worker.js';
 import { startHlsWorker, hlsDir } from './hls-worker.js';
+import { startAssembleWorker } from './assemble-worker.js';
 
 const app = express();
 const PORT = process.env.PORT || 3002;
@@ -21,6 +23,36 @@ const CDN_BASE = (process.env.CDN_URL || '').replace(/\/+$/, '');
 // so it can be cached forever. Without this the CDN falls back to its own
 // default TTL and revalidates against us on every play.
 const MEDIA_CACHE_CONTROL = 'public, max-age=31536000, immutable';
+
+// Browsers upload directly and cannot hold AUTH_TOKEN, so /upload/* also accepts a ticket
+// minted by chigua and scoped to a single upload id. Server-to-server callers keep using
+// the token, so both paths stay open.
+function requireUploadAuth(req, res, next) {
+  const token = req.headers.authorization?.replace('Bearer ', '');
+  if (AUTH_TOKEN && token === AUTH_TOKEN) return next();
+
+  const uploadId = req.headers['x-upload-id'] || req.body?.uploadId;
+  const ticket = verifyTicket(req.headers['x-upload-ticket'], uploadId);
+  if (ticket) {
+    req.uploadTicket = ticket;
+    return next();
+  }
+  if (!AUTH_TOKEN) return next();
+  res.status(401).json({ error: 'Unauthorized' });
+}
+
+// Uploads arrive cross-origin from the admin, which is served from several domains. No
+// cookies are involved — the ticket is the access control — so reflecting the origin does
+// not widen what a caller can do.
+function uploadCors(req, res, next) {
+  res.set('Access-Control-Allow-Origin', req.headers.origin || '*');
+  res.set('Vary', 'Origin');
+  res.set('Access-Control-Allow-Methods', 'POST, OPTIONS');
+  res.set('Access-Control-Allow-Headers', 'Content-Type, X-Upload-Ticket, X-Upload-Id, X-Chunk-Index, X-Filename');
+  res.set('Access-Control-Max-Age', '86400');
+  if (req.method === 'OPTIONS') return res.status(204).end();
+  next();
+}
 
 function requireAuth(req, res, next) {
   const token = req.headers.authorization?.replace('Bearer ', '');
@@ -215,6 +247,9 @@ app.get('/status/:id', async (req, res) => {
       id: record.id,
       url: `/media/${record.id}.${record.ext}`,
       type: record.type,
+      ext: record.ext,
+      size: record.size,
+      mime_type: record.mime_type,
     };
     // Whether a playlist exists is a property of the stored file, not of this pointer.
     if (record.type === 'video' && stored.hls_ready) {
@@ -223,10 +258,16 @@ app.get('/status/:id', async (req, res) => {
     return res.json(result);
   }
 
+  // Not ready yet, but chigua needs these to build the media row up front — an upload is
+  // referenced before it has finished assembling.
   res.json({
     ready: false,
     id: record.id,
     status: record.status,
+    type: record.type,
+    ext: record.ext,
+    size: record.size,
+    mime_type: record.mime_type,
     error: record.error || undefined,
   });
 });
@@ -354,7 +395,8 @@ app.post('/upload', requireAuth, async (req, res) => {
 // ─── POST /upload/chunk — one piece of a chunked upload ─────────────────────
 // Callers reach this server through Cloudflare, which rejects bodies over 100MB at the
 // edge, so large files have to arrive in pieces and be reassembled here.
-app.post('/upload/chunk', requireAuth, async (req, res) => {
+app.options('/upload/chunk', uploadCors);
+app.post('/upload/chunk', uploadCors, requireUploadAuth, async (req, res) => {
   const uploadId = req.headers['x-upload-id'];
   const index = Number(req.headers['x-chunk-index']);
   if (!uploadId || !Number.isInteger(index)) {
@@ -362,15 +404,17 @@ app.post('/upload/chunk', requireAuth, async (req, res) => {
   }
   maybeSweep();
   try {
-    const size = await writePart(uploadId, index, req);
+    // A ticket caps the total it may stage, so a caller cannot fill the disk with one id.
+    const size = await writePart(uploadId, index, req, req.uploadTicket?.maxSize ?? Infinity);
     res.json({ ok: true, index, size });
   } catch (err) {
     res.status(400).json({ error: err.message });
   }
 });
 
-// ─── POST /upload/finalize — assemble chunks into one media file ────────────
-app.post('/upload/finalize', requireAuth, async (req, res) => {
+// ─── POST /upload/finalize — accept the staged chunks and assemble in the background ──
+app.options('/upload/finalize', uploadCors);
+app.post('/upload/finalize', uploadCors, requireUploadAuth, async (req, res) => {
   const { uploadId, totalChunks, filename, mime_type } = req.body || {};
 
   let names;
@@ -392,49 +436,31 @@ app.post('/upload/finalize', requireAuth, async (req, res) => {
   const type = isVideo ? 'video' : 'photo';
   const mime = mime_type || EXT_TO_MIME[ext] || 'application/octet-stream';
 
+  // Assembling here would copy the whole file into place over NFS and then remux it —
+  // minutes for a large upload, inside a browser request that Cloudflare cuts at ~100s.
+  // Record the intent and let the assemble worker do it.
   const id = nanoid();
-  // Assembled straight into its final location, hashing as it goes — buffering a 1GB+
-  // file to compute the hash first would exhaust memory on this box.
-  const dest = getPath(type, id, ext);
-
   try {
-    const { size, hash } = await assembleTo(uploadId, dest, names);
-    if (!size) {
-      await fsp.rm(dest, { force: true }).catch(() => {});
-      return res.status(400).json({ error: 'Empty file' });
-    }
-
-    // Dedup runs after assembly here (the hash isn't known until the bytes are written),
-    // so an already-known file costs one wasted write, which is then removed.
-    const dupe = await findByContentHash(hash);
-    if (dupe) {
-      await fsp.rm(dest, { force: true }).catch(() => {});
-      return res.json({
-        ready: true, id: dupe.id, url: `/media/${dupe.id}.${dupe.ext}`,
-        type: dupe.type, deduplicated: true,
-      });
-    }
-
-    await faststartStored(type, id, ext);
-    const needsHls = type === 'video' && size > HLS_SIZE_THRESHOLD;
-    await insert({
-      id, status: needsHls ? 'transcoding' : 'ready', type, ext, source: 'upload',
-      content_hash: hash, size, mime_type: mime,
-    });
-
-    res.json({
-      ready: !needsHls,
-      id,
-      url: `/media/${id}.${ext}`,
-      type,
-      status: needsHls ? 'transcoding' : 'ready',
-    });
+    // The staging directory takes the media id, so the row is all the worker needs to
+    // find its bytes.
+    await renameStaging(uploadId, id);
   } catch (err) {
-    await fsp.rm(dest, { force: true }).catch(() => {});
-    res.status(500).json({ error: err.message });
-  } finally {
     await discard(uploadId);
+    return res.status(500).json({ error: `could not stage upload: ${err.message}` });
   }
+
+  await insert({
+    id, status: 'assembling', type, ext, source: 'upload', mime_type: mime,
+  });
+
+  res.status(202).json({
+    ready: false,
+    id,
+    ext,
+    url: `/media/${id}.${ext}`,
+    type,
+    status: 'assembling',
+  });
 });
 
 // ─── Dashboard ──────────────────────────────────────────────────────────────
@@ -591,6 +617,7 @@ app.post('/dashboard/retry/:id', requireDashboardAuth, async (req, res) => {
 // Start workers and server
 startWorker();
 startHlsWorker();
+startAssembleWorker();
 
 app.listen(PORT, () => {
   console.log(`[media-server] Listening on :${PORT}`);

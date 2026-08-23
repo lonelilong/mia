@@ -194,6 +194,14 @@ export async function getQueued(limit = 10) {
 }
 
 
+export async function getAssembling(limit = 1) {
+  const r = await client.execute({
+    sql: "SELECT * FROM media WHERE status = 'assembling' ORDER BY created_at ASC LIMIT ?",
+    args: [limit],
+  });
+  return r.rows;
+}
+
 export async function getTranscoding(limit = 5) {
   const r = await client.execute({
     sql: "SELECT * FROM media WHERE status = 'transcoding' ORDER BY created_at ASC LIMIT ?",
