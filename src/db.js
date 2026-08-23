@@ -25,8 +25,21 @@ await client.execute(`
 // Added after the fact: whether an HLS playlist actually exists for this row, and why it
 // doesn't if it doesn't. Before this, hls_url was inferred from size alone, which lied
 // whenever a transcode failed.
-for (const col of ['hls_ready INTEGER DEFAULT 0', 'hls_error TEXT']) {
-  await client.execute(`ALTER TABLE media ADD COLUMN ${col}`).catch(() => {});
+//
+// The ALTER only succeeds once, so the backfill rides along with it: without seeding
+// hls_ready for rows that predate the column, every existing video would abruptly stop
+// advertising hls_url on deploy. Seeding by the old size rule reproduces exactly the
+// behaviour those rows already had; scripts/verify-hls-ready.mjs refines it against disk.
+const addedHlsReady = await client
+  .execute('ALTER TABLE media ADD COLUMN hls_ready INTEGER DEFAULT 0')
+  .then(() => true, () => false);
+await client.execute('ALTER TABLE media ADD COLUMN hls_error TEXT').catch(() => {});
+
+if (addedHlsReady) {
+  const r = await client.execute(
+    "UPDATE media SET hls_ready = 1 WHERE status = 'ready' AND type = 'video' AND size > 10485760"
+  );
+  console.log(`[db] hls_ready backfilled for ${r.rowsAffected} existing videos`);
 }
 
 await client.execute(`
