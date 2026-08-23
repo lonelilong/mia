@@ -56,9 +56,13 @@ async function processJob(job) {
     // Dedup by content
     const dupe = await findByContentHash(hash);
     if (dupe) {
+      // No file is written for this row — the bytes are already on disk under dupe.id —
+      // so record where they live. Everything that builds or serves a URL resolves this,
+      // which is what stops the row pointing at a file that does not exist.
       await updateReady(job.id, {
         type: media.type, ext: dupe.ext,
         contentHash: hash, size: media.size, mimeType: media.mime,
+        duplicateOf: dupe.id,
       });
       console.log(`[worker] ${job.id} deduplicated to ${dupe.id}`);
       await notifyReady({ ...job, type: media.type, ext: dupe.ext });

@@ -42,6 +42,36 @@ if (addedHlsReady) {
   console.log(`[db] hls_ready backfilled for ${r.rowsAffected} existing videos`);
 }
 
+// Set when a download turns out to be byte-identical to a file already stored: the row
+// keeps its own id (it is the identity of a distinct Telegram message) but the bytes live
+// under the target's id. Without it such rows were marked ready while pointing at a file
+// that was never written, so every URL built from them 404'd.
+const addedDuplicateOf = await client
+  .execute('ALTER TABLE media ADD COLUMN duplicate_of TEXT')
+  .then(() => true, () => false);
+
+if (addedDuplicateOf) {
+  // Rows that were de-duplicated before the column existed are still pointing at files
+  // that were never written. The pairing is recoverable: an identical content_hash on an
+  // older row is exactly the match the worker made at the time. Oldest row per hash wins,
+  // since that is the one whose bytes were actually saved.
+  const r = await client.execute(`
+    UPDATE media SET duplicate_of = (
+      SELECT o.id FROM media o
+      WHERE o.content_hash = media.content_hash
+        AND o.id <> media.id
+        AND o.status = 'ready'
+        AND o.duplicate_of IS NULL
+      ORDER BY o.created_at ASC LIMIT 1
+    )
+    WHERE content_hash IS NOT NULL
+      AND status = 'ready'
+      AND rowid NOT IN (
+        SELECT MIN(rowid) FROM media WHERE content_hash IS NOT NULL AND status = 'ready' GROUP BY content_hash
+      )`);
+  console.log(`[db] duplicate_of backfilled for ${r.rowsAffected} rows`);
+}
+
 await client.execute(`
   CREATE INDEX IF NOT EXISTS idx_media_tg
   ON media (tg_channel, tg_message_id)
@@ -97,11 +127,21 @@ export async function insert(record) {
   });
 }
 
-export async function updateReady(id, { type, ext, contentHash, size, mimeType, status = 'ready' }) {
+export async function updateReady(id, { type, ext, contentHash, size, mimeType, status = 'ready', duplicateOf = null }) {
   await client.execute({
-    sql: "UPDATE media SET status = ?, type = ?, ext = ?, content_hash = ?, size = ?, mime_type = ? WHERE id = ?",
-    args: [status, type, ext, contentHash, size, mimeType, id],
+    sql: "UPDATE media SET status = ?, type = ?, ext = ?, content_hash = ?, size = ?, mime_type = ?, duplicate_of = ? WHERE id = ?",
+    args: [status, type, ext, contentHash, size, mimeType, duplicateOf, id],
   });
+}
+
+/**
+ * The record whose id actually names the stored file. For a de-duplicated row that is the
+ * row it duplicates; for everything else it is the row itself.
+ */
+export async function resolveStored(record) {
+  if (!record?.duplicate_of) return record;
+  const target = await findById(record.duplicate_of);
+  return target ?? record;
 }
 
 export async function updateFailed(id, error, status = 'failed') {

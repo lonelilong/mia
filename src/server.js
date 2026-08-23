@@ -3,7 +3,7 @@ import path from 'path';
 import express from 'express';
 import cookieParser from 'cookie-parser';
 import { nanoid } from 'nanoid';
-import { findById, findByTg, findByContentHash, insert, updateReady, requeue, getStats, requeueAll, HLS_SIZE_THRESHOLD } from './db.js';
+import { findById, findByTg, findByContentHash, insert, updateReady, requeue, getStats, requeueAll, resolveStored, HLS_SIZE_THRESHOLD } from './db.js';
 import { save, getPath, contentHash } from './storage.js';
 import { faststartStored } from './faststart.js';
 import fsp from 'fs/promises';
@@ -42,12 +42,16 @@ app.get('/media/:filename', async (req, res) => {
     return res.status(404).json({ error: 'Not found' });
   }
 
+  // A de-duplicated row has no file of its own; the bytes sit under the row it
+  // duplicates. Resolving here means URLs already stored by callers keep working.
+  const stored = await resolveStored(record);
+
   const mime = record.mime_type || EXT_TO_MIME[ext] || 'application/octet-stream';
   // Stream from disk rather than reading the whole file into a Buffer: these
   // are routinely 40 MB+ videos, and a Range request for the first few KB
   // should not cost a full-file read. sendFile also answers Range with 206,
   // which is what players need to seek.
-  res.sendFile(getPath(record.type, id, ext), {
+  res.sendFile(getPath(stored.type, stored.id, stored.ext), {
     headers: { 'Content-Type': mime, 'Cache-Control': MEDIA_CACHE_CONTROL },
   }, (err) => {
     if (!err) return;
@@ -62,7 +66,8 @@ app.get('/hls/:id/index.m3u8', async (req, res) => {
   if (!record || record.type !== 'video' || record.status !== 'ready') {
     return res.status(404).json({ error: 'HLS not available' });
   }
-  const fp = path.join(hlsDir(record.id), 'index.m3u8');
+  const stored = await resolveStored(record);
+  const fp = path.join(hlsDir(stored.id), 'index.m3u8');
   // Headers go through sendFile's options so they are only applied on a
   // successful transfer — setting them up front made 404s cacheable for a year.
   res.sendFile(fp, {
@@ -74,10 +79,13 @@ app.get('/hls/:id/index.m3u8', async (req, res) => {
   });
 });
 
-app.get('/hls/:id/:segment', (req, res) => {
+app.get('/hls/:id/:segment', async (req, res) => {
   const { id, segment } = req.params;
   if (!/^seg\d+\.ts$/.test(segment)) return res.status(400).end();
-  const fp = path.join(hlsDir(id), segment);
+  // Segment URLs in the playlist are relative, so they arrive under whichever id the
+  // caller used — resolve the same way the playlist did.
+  const stored = await resolveStored(await findById(id));
+  const fp = path.join(hlsDir(stored?.id ?? id), segment);
   res.sendFile(fp, {
     headers: { 'Content-Type': 'video/mp2t', 'Cache-Control': MEDIA_CACHE_CONTROL },
   }, (err) => {
@@ -201,13 +209,15 @@ app.get('/status/:id', async (req, res) => {
   if (!record) return res.status(404).json({ error: 'Not found' });
 
   if (record.status === 'ready') {
+    const stored = await resolveStored(record);
     const result = {
       ready: true,
       id: record.id,
       url: `/media/${record.id}.${record.ext}`,
       type: record.type,
     };
-    if (record.type === 'video' && record.hls_ready) {
+    // Whether a playlist exists is a property of the stored file, not of this pointer.
+    if (record.type === 'video' && stored.hls_ready) {
       result.hls_url = `/hls/${record.id}/index.m3u8`;
     }
     return res.json(result);
@@ -236,6 +246,7 @@ app.post('/status-batch', requireAuth, async (req, res) => {
       continue;
     }
     if (record.status === 'ready') {
+      const stored = await resolveStored(record);
       const result = {
         ready: true,
         id: record.id,
@@ -243,7 +254,7 @@ app.post('/status-batch', requireAuth, async (req, res) => {
         type: record.type,
         channel, message_id,
       };
-      if (record.type === 'video' && record.hls_ready) {
+      if (record.type === 'video' && stored.hls_ready) {
         result.hls_url = `/hls/${record.id}/index.m3u8`;
       }
       results.push(result);
