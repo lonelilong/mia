@@ -6,6 +6,8 @@ import { nanoid } from 'nanoid';
 import { findById, findByTg, findByContentHash, insert, updateReady, requeue, getStats, requeueAll, HLS_SIZE_THRESHOLD } from './db.js';
 import { save, getPath, contentHash } from './storage.js';
 import { faststartStored } from './faststart.js';
+import fsp from 'fs/promises';
+import { writePart, listParts, assembleTo, discard, maybeSweep } from './chunk-store.js';
 import { EXT_TO_MIME } from './telegram.js';
 import { startWorker } from './worker.js';
 import { startHlsWorker, hlsDir } from './hls-worker.js';
@@ -336,6 +338,92 @@ app.post('/upload', requireAuth, async (req, res) => {
     type,
     status: needsHls ? 'transcoding' : 'ready',
   });
+});
+
+// ─── POST /upload/chunk — one piece of a chunked upload ─────────────────────
+// Callers reach this server through Cloudflare, which rejects bodies over 100MB at the
+// edge, so large files have to arrive in pieces and be reassembled here.
+app.post('/upload/chunk', requireAuth, async (req, res) => {
+  const uploadId = req.headers['x-upload-id'];
+  const index = Number(req.headers['x-chunk-index']);
+  if (!uploadId || !Number.isInteger(index)) {
+    return res.status(400).json({ error: 'x-upload-id and x-chunk-index required' });
+  }
+  maybeSweep();
+  try {
+    const size = await writePart(uploadId, index, req);
+    res.json({ ok: true, index, size });
+  } catch (err) {
+    res.status(400).json({ error: err.message });
+  }
+});
+
+// ─── POST /upload/finalize — assemble chunks into one media file ────────────
+app.post('/upload/finalize', requireAuth, async (req, res) => {
+  const { uploadId, totalChunks, filename, mime_type } = req.body || {};
+
+  let names;
+  try {
+    names = await listParts(uploadId);
+  } catch (err) {
+    return res.status(400).json({ error: err.message });
+  }
+  // A hole in the sequence would assemble into a silently corrupt file that only fails
+  // later, at playback — refuse instead.
+  if (!names.length || names.length !== Number(totalChunks)) {
+    await discard(uploadId);
+    return res.status(400).json({ error: `incomplete upload (${names.length}/${totalChunks} chunks)` });
+  }
+
+  const originalName = filename || 'upload';
+  const ext = originalName.split('.').pop()?.toLowerCase() || 'bin';
+  const isVideo = mime_type?.startsWith('video/') || ['mp4', 'mov', 'webm'].includes(ext);
+  const type = isVideo ? 'video' : 'photo';
+  const mime = mime_type || EXT_TO_MIME[ext] || 'application/octet-stream';
+
+  const id = nanoid();
+  // Assembled straight into its final location, hashing as it goes — buffering a 1GB+
+  // file to compute the hash first would exhaust memory on this box.
+  const dest = getPath(type, id, ext);
+
+  try {
+    const { size, hash } = await assembleTo(uploadId, dest, names);
+    if (!size) {
+      await fsp.rm(dest, { force: true }).catch(() => {});
+      return res.status(400).json({ error: 'Empty file' });
+    }
+
+    // Dedup runs after assembly here (the hash isn't known until the bytes are written),
+    // so an already-known file costs one wasted write, which is then removed.
+    const dupe = await findByContentHash(hash);
+    if (dupe) {
+      await fsp.rm(dest, { force: true }).catch(() => {});
+      return res.json({
+        ready: true, id: dupe.id, url: `/media/${dupe.id}.${dupe.ext}`,
+        type: dupe.type, deduplicated: true,
+      });
+    }
+
+    await faststartStored(type, id, ext);
+    const needsHls = type === 'video' && size > HLS_SIZE_THRESHOLD;
+    await insert({
+      id, status: needsHls ? 'transcoding' : 'ready', type, ext, source: 'upload',
+      content_hash: hash, size, mime_type: mime,
+    });
+
+    res.json({
+      ready: !needsHls,
+      id,
+      url: `/media/${id}.${ext}`,
+      type,
+      status: needsHls ? 'transcoding' : 'ready',
+    });
+  } catch (err) {
+    await fsp.rm(dest, { force: true }).catch(() => {});
+    res.status(500).json({ error: err.message });
+  } finally {
+    await discard(uploadId);
+  }
 });
 
 // ─── Dashboard ──────────────────────────────────────────────────────────────
