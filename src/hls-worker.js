@@ -95,9 +95,9 @@ async function transcode(job) {
     await updateHlsReady(job.id);
     console.log(`[hls] ${job.id} ready (with HLS)`);
   } catch (err) {
-    // The mp4 is already downloaded, faststarted and playable — only the streaming
-    // variant is missing, so the row stays 'ready' and just loses its hls_url.
-    console.error(`[hls] ${job.id} HLS failed, serving mp4 only:`, err.message.slice(0, 200));
+    // Not promoted to 'ready': videos this large are HLS-only, so without a playlist
+    // there is nothing servable. The mp4 stays on disk for a retry.
+    console.error(`[hls] ${job.id} HLS failed, held unserved:`, err.message.slice(0, 200));
     await updateHlsFailed(job.id, `HLS: ${err.message}`.slice(0, 2000));
     await fs.rm(outDir, { recursive: true, force: true }).catch(() => {});
   }

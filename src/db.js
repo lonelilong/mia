@@ -169,9 +169,6 @@ export async function updateStatus(id, status) {
   });
 }
 
-// HLS is an enhancement, not a gate: the mp4 is already downloaded and playable by the
-// time transcoding runs, so a transcode outcome only ever sets hls_ready — it must never
-// move the row out of 'ready'.
 export async function updateHlsReady(id) {
   await client.execute({
     sql: "UPDATE media SET status = 'ready', hls_ready = 1, hls_error = NULL WHERE id = ?",
@@ -179,11 +176,25 @@ export async function updateHlsReady(id) {
   });
 }
 
+// Videos above HLS_SIZE_THRESHOLD are served as HLS only — never as a direct mp4 — so a
+// failed transcode must NOT reach 'ready'. It parks in its own status instead of 'failed'
+// for two reasons: 'failed' means the Telegram download failed, and /fetch re-queues that,
+// which would re-download a file already sitting on disk. From here the only thing missing
+// is the transcode, so requeue-hls.mjs can retry it without touching the network.
 export async function updateHlsFailed(id, error) {
   await client.execute({
-    sql: "UPDATE media SET status = 'ready', hls_ready = 0, hls_error = ? WHERE id = ?",
+    sql: "UPDATE media SET status = 'hls_failed', hls_ready = 0, hls_error = ? WHERE id = ?",
     args: [error, id],
   });
+}
+
+/** Send hls_failed rows back to the HLS worker. Returns how many were requeued. */
+export async function requeueHlsFailed(limit = null) {
+  const sql = limit
+    ? "UPDATE media SET status = 'transcoding' WHERE id IN (SELECT id FROM media WHERE status = 'hls_failed' ORDER BY size ASC LIMIT ?)"
+    : "UPDATE media SET status = 'transcoding' WHERE status = 'hls_failed'";
+  const r = await client.execute({ sql, args: limit ? [limit] : [] });
+  return r.rowsAffected;
 }
 
 // Videos larger than this go through HLS transcoding before becoming ready
