@@ -248,6 +248,14 @@ export async function updateHlsFailed(id, error) {
   });
 }
 
+/** Send one hls_failed row back to the HLS worker without touching the network. */
+export async function requeueOneHlsFailed(id) {
+  await client.execute({
+    sql: "UPDATE media SET status = 'transcoding', hls_error = NULL WHERE id = ? AND status = 'hls_failed'",
+    args: [id],
+  });
+}
+
 /** Send hls_failed rows back to the HLS worker. Returns how many were requeued. */
 export async function requeueHlsFailed(limit = null) {
   const sql = limit

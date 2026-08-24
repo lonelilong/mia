@@ -3,7 +3,7 @@ import path from 'path';
 import express from 'express';
 import cookieParser from 'cookie-parser';
 import { nanoid } from 'nanoid';
-import { findById, findByTg, findByContentHash, insert, updateReady, requeue, getStats, requeueAll, resolveStored, HLS_SIZE_THRESHOLD } from './db.js';
+import { findById, findByTg, findByContentHash, insert, updateReady, requeue, requeueOneHlsFailed, getStats, requeueAll, resolveStored, HLS_SIZE_THRESHOLD } from './db.js';
 import { save, getPath, contentHash } from './storage.js';
 import { faststartStored } from './faststart.js';
 import { generateThumbnail } from './thumbnail.js';
@@ -172,6 +172,11 @@ app.post('/fetch', requireAuth, async (req, res) => {
       await requeue(existing.id, { force });
       return res.json({ ready: false, id: existing.id, status: 'queued' });
     }
+    // The mp4 is already on disk — only the transcode needs another attempt, not the download.
+    if (existing.status === 'hls_failed') {
+      await requeueOneHlsFailed(existing.id);
+      return res.json({ ready: false, id: existing.id, status: 'transcoding' });
+    }
     return res.json({
       ready: false,
       id: existing.id,
@@ -215,10 +220,13 @@ app.post('/fetch-batch', requireAuth, async (req, res) => {
         });
       } else {
         if (existing.status === 'failed') await requeue(existing.id);
+        else if (existing.status === 'hls_failed') await requeueOneHlsFailed(existing.id);
         results.push({
           ready: false,
           id: existing.id,
-          status: existing.status === 'failed' ? 'queued' : existing.status,
+          status: existing.status === 'failed' ? 'queued'
+            : existing.status === 'hls_failed' ? 'transcoding'
+            : existing.status,
           channel, message_id,
         });
       }

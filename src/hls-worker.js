@@ -51,7 +51,7 @@ async function probeDuration(src) {
 // A stream copy is near-instant regardless of length; only re-encoding needs a real budget.
 function transcodeBudgetMs(durationSeconds, needsReencode) {
   if (!needsReencode || !durationSeconds) return MIN_TRANSCODE_MS;
-  const needed = (durationSeconds / SLOWEST_EXPECTED_SPEED) * 1000;
+  const needed = Math.round((durationSeconds / SLOWEST_EXPECTED_SPEED) * 1000);
   return Math.min(MAX_TRANSCODE_MS, Math.max(MIN_TRANSCODE_MS, needed));
 }
 
