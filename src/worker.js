@@ -2,6 +2,7 @@ import { getQueued, updateReady, updateFailed, findByContentHash, HLS_SIZE_THRES
 import { save, contentHash } from './storage.js';
 import { faststartStored } from './faststart.js';
 import { fetchMedia } from './telegram.js';
+import { generateThumbnail } from './thumbnail.js';
 
 const CALLBACK_URL = process.env.CALLBACK_URL || '';
 const AUTH_TOKEN = process.env.AUTH_TOKEN || '';
