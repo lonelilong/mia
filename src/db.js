@@ -72,6 +72,11 @@ if (addedDuplicateOf) {
   console.log(`[db] duplicate_of backfilled for ${r.rowsAffected} rows`);
 }
 
+// Points at the photo record holding this video's poster frame. Thumbnails are stored as
+// ordinary media rows so they are served over the existing /media/<id>.jpg path and reach
+// the CDN with no extra routing.
+await client.execute('ALTER TABLE media ADD COLUMN thumb_id TEXT').catch(() => {});
+
 await client.execute(`
   CREATE INDEX IF NOT EXISTS idx_media_tg
   ON media (tg_channel, tg_message_id)
@@ -208,6 +213,13 @@ export async function getTranscoding(limit = 5) {
     args: [limit],
   });
   return r.rows;
+}
+
+export async function setThumb(id, thumbId) {
+  await client.execute({
+    sql: 'UPDATE media SET thumb_id = ? WHERE id = ?',
+    args: [thumbId, id],
+  });
 }
 
 export async function updateStatus(id, status) {

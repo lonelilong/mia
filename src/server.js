@@ -6,6 +6,7 @@ import { nanoid } from 'nanoid';
 import { findById, findByTg, findByContentHash, insert, updateReady, requeue, getStats, requeueAll, resolveStored, HLS_SIZE_THRESHOLD } from './db.js';
 import { save, getPath, contentHash } from './storage.js';
 import { faststartStored } from './faststart.js';
+import { generateThumbnail } from './thumbnail.js';
 import fsp from 'fs/promises';
 import { writePart, listParts, discard, maybeSweep, renameStaging } from './chunk-store.js';
 import { EXT_TO_MIME } from './telegram.js';
@@ -255,6 +256,11 @@ app.get('/status/:id', async (req, res) => {
     if (record.type === 'video' && stored.hls_ready) {
       result.hls_url = `/hls/${record.id}/index.m3u8`;
     }
+    // Same for the poster: a de-duplicated row has none of its own and borrows the
+    // original's, which is the same image by definition.
+    if (stored.thumb_id) {
+      result.thumb_url = `/media/${stored.thumb_id}.jpg`;
+    }
     return res.json(result);
   }
 
@@ -297,6 +303,9 @@ app.post('/status-batch', requireAuth, async (req, res) => {
       };
       if (record.type === 'video' && stored.hls_ready) {
         result.hls_url = `/hls/${record.id}/index.m3u8`;
+      }
+      if (stored.thumb_id) {
+        result.thumb_url = `/media/${stored.thumb_id}.jpg`;
       }
       results.push(result);
     } else {
@@ -461,6 +470,28 @@ app.post('/upload/finalize', uploadCors, requireUploadAuth, async (req, res) => 
     type,
     status: 'assembling',
   });
+});
+
+// ─── POST /thumb/:id — generate a poster for an existing video ───────────────
+// Only needed to backfill videos stored before thumbnails existed; new ones get theirs
+// at ingest. Ordering is the caller's business — chigua prioritises by category, which
+// this server knows nothing about.
+app.post('/thumb/:id', requireAuth, async (req, res) => {
+  const record = await findById(req.params.id);
+  if (!record) return res.status(404).json({ error: 'Not found' });
+  if (record.type !== 'video') return res.status(400).json({ error: 'not a video' });
+
+  const stored = await resolveStored(record);
+  if (stored.thumb_id) {
+    return res.json({ id: record.id, thumb_url: `/media/${stored.thumb_id}.jpg`, generated: false });
+  }
+  if (stored.status !== 'ready' && stored.status !== 'transcoding') {
+    return res.status(409).json({ error: `not available (${stored.status})` });
+  }
+
+  const thumbId = await generateThumbnail(stored.id, stored.ext);
+  if (!thumbId) return res.status(500).json({ error: 'could not extract a frame' });
+  res.json({ id: record.id, thumb_url: `/media/${thumbId}.jpg`, generated: true });
 });
 
 // ─── Dashboard ──────────────────────────────────────────────────────────────

@@ -75,6 +75,10 @@ async function processJob(job) {
     // stable across this rewrite.
     await faststartStored(media.type, job.id, media.ext);
 
+    // Before the HLS decision: the mp4 is final either way, so a large video gets its
+    // poster now rather than after a transcode that can take an hour.
+    if (media.type === 'video') await generateThumbnail(job.id, media.ext);
+
     const needsHls = media.type === 'video' && media.size > HLS_SIZE_THRESHOLD;
     await updateReady(job.id, {
       type: media.type, ext: media.ext,

@@ -3,6 +3,7 @@ import { getAssembling, updateReady, updateFailed, findByContentHash } from './d
 import { assembleTo, listParts, discard } from './chunk-store.js';
 import { getPath } from './storage.js';
 import { faststartStored } from './faststart.js';
+import { generateThumbnail } from './thumbnail.js';
 import { HLS_SIZE_THRESHOLD } from './db.js';
 
 /**
@@ -50,6 +51,8 @@ async function assembleOne(job) {
     }
 
     await faststartStored(job.type, job.id, job.ext);
+
+    if (job.type === 'video') await generateThumbnail(job.id, job.ext);
 
     const needsHls = job.type === 'video' && size > HLS_SIZE_THRESHOLD;
     await updateReady(job.id, {
