@@ -160,10 +160,11 @@ app.post('/fetch', requireAuth, async (req, res) => {
   const existing = await findByTg(channel, message_id);
   if (existing) {
     if (existing.status === 'ready') {
+      const stored = await resolveStored(existing);
       return res.json({
         ready: true,
         id: existing.id,
-        url: `/media/${existing.id}.${existing.ext}`,
+        url: `/media/${stored.id}.${stored.ext}`,
         type: existing.type,
       });
     }
@@ -211,10 +212,11 @@ app.post('/fetch-batch', requireAuth, async (req, res) => {
     const existing = await findByTg(channel, message_id);
     if (existing) {
       if (existing.status === 'ready') {
+        const stored = await resolveStored(existing);
         results.push({
           ready: true,
           id: existing.id,
-          url: `/media/${existing.id}.${existing.ext}`,
+          url: `/media/${stored.id}.${stored.ext}`,
           type: existing.type,
           channel, message_id,
         });
@@ -254,7 +256,9 @@ app.get('/status/:id', async (req, res) => {
     const result = {
       ready: true,
       id: record.id,
-      url: `/media/${record.id}.${record.ext}`,
+      // A de-duplicated row has no file of its own — the bytes, and therefore the URL,
+      // belong to whatever resolveStored() points at.
+      url: `/media/${stored.id}.${stored.ext}`,
       type: record.type,
       ext: record.ext,
       size: record.size,
@@ -262,7 +266,7 @@ app.get('/status/:id', async (req, res) => {
     };
     // Whether a playlist exists is a property of the stored file, not of this pointer.
     if (record.type === 'video' && stored.hls_ready) {
-      result.hls_url = `/hls/${record.id}/index.m3u8`;
+      result.hls_url = `/hls/${stored.id}/index.m3u8`;
     }
     // Same for the poster: a de-duplicated row has none of its own and borrows the
     // original's, which is the same image by definition.
@@ -305,12 +309,12 @@ app.post('/status-batch', requireAuth, async (req, res) => {
       const result = {
         ready: true,
         id: record.id,
-        url: `/media/${record.id}.${record.ext}`,
+        url: `/media/${stored.id}.${stored.ext}`,
         type: record.type,
         channel, message_id,
       };
       if (record.type === 'video' && stored.hls_ready) {
-        result.hls_url = `/hls/${record.id}/index.m3u8`;
+        result.hls_url = `/hls/${stored.id}/index.m3u8`;
       }
       if (stored.thumb_id) {
         result.thumb_url = `/media/${stored.thumb_id}.jpg`;
