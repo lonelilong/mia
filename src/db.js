@@ -265,5 +265,7 @@ export async function requeueHlsFailed(limit = null) {
   return r.rowsAffected;
 }
 
-// Videos larger than this go through HLS transcoding before becoming ready
-export const HLS_SIZE_THRESHOLD = 10 * 1024 * 1024;
+// Every video goes through HLS transcoding before becoming ready — no direct-mp4 size
+// exemption anymore. Kept as a threshold (rather than restructuring every needsHls check)
+// so it stays a single number to flip back if that policy changes again.
+export const HLS_SIZE_THRESHOLD = 0;
