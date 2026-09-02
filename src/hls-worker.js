@@ -10,6 +10,10 @@ const execFileAsync = promisify(execFile);
 const DATA_DIR = path.resolve(process.env.DATA_DIR || '/data');
 const POLL_INTERVAL = 5000;
 const SEGMENT_SECONDS = 3;
+// Probing over NFS occasionally takes longer than 10s for large files, especially under
+// concurrent load — a probe that times out is not the same as an unrecognized codec, but
+// used to be treated identically, silently forcing a needless re-encode.
+const PROBE_TIMEOUT_MS = 30_000;
 // A flat timeout killed anything longer than `budget * encode_speed` of content — in
 // practice every video over ~16 min, and over ~1.5 min for slow HEVC sources. Budget by
 // source duration instead, at a pessimistic 0.15x, with a floor and a ceiling.
@@ -28,9 +32,12 @@ async function probeCodec(src) {
     const { stdout } = await execFileAsync('ffprobe', [
       '-v', 'error', '-select_streams', 'v:0',
       '-show_entries', 'stream=codec_name', '-of', 'csv=p=0', src,
-    ], { timeout: 10_000 });
+    ], { timeout: PROBE_TIMEOUT_MS });
     return stdout.trim();
-  } catch {
+  } catch (err) {
+    // 'unknown' forces a re-encode further down, so a probe that merely timed out on a
+    // perfectly normal file must not look the same as one that genuinely can't be read.
+    console.error(`[hls] probeCodec failed for ${src}:`, err.message.slice(0, 200));
     return 'unknown';
   }
 }
@@ -40,10 +47,11 @@ async function probeDuration(src) {
     const { stdout } = await execFileAsync('ffprobe', [
       '-v', 'error', '-show_entries', 'format=duration',
       '-of', 'csv=p=0', src,
-    ], { timeout: 10_000 });
+    ], { timeout: PROBE_TIMEOUT_MS });
     const seconds = parseFloat(stdout.trim());
     return Number.isFinite(seconds) ? seconds : 0;
-  } catch {
+  } catch (err) {
+    console.error(`[hls] probeDuration failed for ${src}:`, err.message.slice(0, 200));
     return 0;
   }
 }
