@@ -3,7 +3,7 @@ import path from 'path';
 import express from 'express';
 import cookieParser from 'cookie-parser';
 import { nanoid } from 'nanoid';
-import { findById, findByTg, findByContentHash, insert, updateReady, requeue, requeueOneHlsFailed, getStats, requeueAll, resolveStored, HLS_SIZE_THRESHOLD } from './db.js';
+import { findById, findByTg, findByContentHash, insert, updateReady, requeue, requeueOneHlsFailed, getStats, requeueAll, resolveStored, setPriority, HLS_SIZE_THRESHOLD } from './db.js';
 import { save, getPath, contentHash } from './storage.js';
 import { faststartStored } from './faststart.js';
 import { generateThumbnail } from './thumbnail.js';
@@ -203,7 +203,7 @@ app.post('/fetch-batch', requireAuth, async (req, res) => {
   }
 
   const results = [];
-  for (const { channel, message_id, type: hintType, size: hintSize, mime_type: hintMime, force } of items) {
+  for (const { channel, message_id, type: hintType, size: hintSize, mime_type: hintMime, force, priority } of items) {
     if (!channel || !message_id) {
       results.push({ channel, message_id, error: 'channel and message_id required' });
       continue;
@@ -227,6 +227,9 @@ app.post('/fetch-batch', requireAuth, async (req, res) => {
         // what caused an infinite retry loop before force existed here.
         if (force && existing.status === 'failed') await requeue(existing.id);
         else if (force && existing.status === 'hls_failed') await requeueOneHlsFailed(existing.id);
+        // A still-queued/transcoding row can be promoted even without force — this
+        // only changes which job gets picked next, never interrupts one in progress.
+        if (priority > (existing.priority || 0)) await setPriority(existing.id, priority);
         results.push({
           ready: false,
           id: existing.id,
@@ -243,6 +246,7 @@ app.post('/fetch-batch', requireAuth, async (req, res) => {
     await insert({
       id, source: 'telegram', tg_channel: channel, tg_message_id: message_id,
       type: hintType || null, size: hintSize || null, mime_type: hintMime || null,
+      priority: priority || 0,
     });
     results.push({ ready: false, id, status: 'queued', channel, message_id });
   }

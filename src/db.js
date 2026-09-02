@@ -77,6 +77,11 @@ if (addedDuplicateOf) {
 // the CDN with no extra routing.
 await client.execute('ALTER TABLE media ADD COLUMN thumb_id TEXT').catch(() => {});
 
+// Queue ordering hint only — never preempts a job already running, just decides which
+// queued/transcoding row gets picked next. chigua sets this at submit time based on
+// category; higher goes first.
+await client.execute('ALTER TABLE media ADD COLUMN priority INTEGER NOT NULL DEFAULT 0').catch(() => {});
+
 await client.execute(`
   CREATE INDEX IF NOT EXISTS idx_media_tg
   ON media (tg_channel, tg_message_id)
@@ -120,16 +125,21 @@ export async function findById(id) {
 
 export async function insert(record) {
   await client.execute({
-    sql: `INSERT INTO media (id, status, type, ext, source, tg_channel, tg_message_id, content_hash, size, mime_type, force)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    sql: `INSERT INTO media (id, status, type, ext, source, tg_channel, tg_message_id, content_hash, size, mime_type, force, priority)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     args: [
       record.id, record.status || 'queued',
       record.type || null, record.ext || null, record.source,
       record.tg_channel || null, record.tg_message_id || null,
       record.content_hash || null, record.size || null, record.mime_type || null,
-      record.force || 0,
+      record.force || 0, record.priority || 0,
     ],
   });
+}
+
+/** Bump priority on an existing row — used to reprioritize something already queued. */
+export async function setPriority(id, priority) {
+  await client.execute({ sql: 'UPDATE media SET priority = ? WHERE id = ?', args: [priority, id] });
 }
 
 export async function updateReady(id, { type, ext, contentHash, size, mimeType, status = 'ready', duplicateOf = null }) {
@@ -184,6 +194,7 @@ export async function requeueAll() {
 export async function getQueued(limit = 10) {
   const r = await client.execute({
     sql: `SELECT * FROM media WHERE status = 'queued' ORDER BY
+      priority DESC,
       CASE
         WHEN type = 'photo' OR (type IS NOT NULL AND type != 'video') THEN 0
         WHEN type = 'video' AND size <= 104857600 THEN 1
@@ -209,7 +220,7 @@ export async function getAssembling(limit = 1) {
 
 export async function getTranscoding(limit = 5) {
   const r = await client.execute({
-    sql: "SELECT * FROM media WHERE status = 'transcoding' ORDER BY created_at ASC LIMIT ?",
+    sql: "SELECT * FROM media WHERE status = 'transcoding' ORDER BY priority DESC, created_at ASC LIMIT ?",
     args: [limit],
   });
   return r.rows;
