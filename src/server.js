@@ -203,7 +203,7 @@ app.post('/fetch-batch', requireAuth, async (req, res) => {
   }
 
   const results = [];
-  for (const { channel, message_id, type: hintType, size: hintSize, mime_type: hintMime } of items) {
+  for (const { channel, message_id, type: hintType, size: hintSize, mime_type: hintMime, force } of items) {
     if (!channel || !message_id) {
       results.push({ channel, message_id, error: 'channel and message_id required' });
       continue;
@@ -221,13 +221,17 @@ app.post('/fetch-batch', requireAuth, async (req, res) => {
           channel, message_id,
         });
       } else {
-        if (existing.status === 'failed') await requeue(existing.id);
-        else if (existing.status === 'hls_failed') await requeueOneHlsFailed(existing.id);
+        // Only requeue on an explicit, deliberate retry (the admin button). Routine
+        // background polling must see the true terminal status, or chigua's attempt
+        // counter never fires and re-requests it forever — this masking is exactly
+        // what caused an infinite retry loop before force existed here.
+        if (force && existing.status === 'failed') await requeue(existing.id);
+        else if (force && existing.status === 'hls_failed') await requeueOneHlsFailed(existing.id);
         results.push({
           ready: false,
           id: existing.id,
-          status: existing.status === 'failed' ? 'queued'
-            : existing.status === 'hls_failed' ? 'transcoding'
+          status: force && existing.status === 'failed' ? 'queued'
+            : force && existing.status === 'hls_failed' ? 'transcoding'
             : existing.status,
           channel, message_id,
         });
