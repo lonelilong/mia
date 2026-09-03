@@ -77,7 +77,14 @@ async function transcode(job) {
 
   try {
     await fs.mkdir(localOutDir, { recursive: true });
-    await fs.copyFile(remoteSrc, localSrc);
+
+    // A file already sitting here — same size as the DB record — was prefetched ahead of
+    // time (e.g. by an operator rsyncing the backlog in). Matching size is a cheap enough
+    // integrity check to trust it and skip a redundant copy over NFS.
+    const stagedSize = await fs.stat(localSrc).then(s => s.size).catch(() => null);
+    if (stagedSize !== job.size) {
+      await fs.copyFile(remoteSrc, localSrc);
+    }
 
     const playlist = path.join(localOutDir, 'index.m3u8');
 
