@@ -47,10 +47,10 @@ export async function faststart(src, { timeout = 300_000 } = {}) {
 
 // Convenience wrapper for stored media: only touches mp4 videos, and swallows
 // failures so a bad remux can never fail an otherwise successful download.
-export async function faststartStored(type, id, ext) {
+export async function faststartStored(type, id, ext, srcPath) {
   if (type !== 'video' || ext !== 'mp4') return false;
   try {
-    await faststart(getPath(type, id, ext));
+    await faststart(srcPath || getPath(type, id, ext));
     return true;
   } catch (err) {
     console.error(`[faststart] ${id} skipped: ${err.message}`);

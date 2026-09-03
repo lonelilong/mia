@@ -1,5 +1,5 @@
 import { getQueued, updateReady, updateFailed, findByContentHash, HLS_SIZE_THRESHOLD } from './db.js';
-import { save, contentHash } from './storage.js';
+import { save, saveLocal, publishLocal, cleanupLocal, resetLocalStaging, contentHash } from './storage.js';
 import { faststartStored } from './faststart.js';
 import { fetchMedia } from './telegram.js';
 import { generateThumbnail } from './thumbnail.js';
@@ -70,15 +70,29 @@ async function processJob(job) {
       return;
     }
 
-    await save(media.type, job.id, media.ext, media.buffer);
-    // Relocate the moov atom before the file is ever served. `contentHash` is
-    // deliberately taken from the original download above, so dedup keys stay
-    // stable across this rewrite.
-    await faststartStored(media.type, job.id, media.ext);
+    if (media.type === 'video') {
+      // Staged locally rather than written straight to NFS: faststart's remux and the
+      // thumbnail's frame grab both need to read the file back, and running that against
+      // local disk instead avoids reading and writing the whole video over NFS twice more.
+      try {
+        const localPath = await saveLocal(job.id, media.ext, media.buffer);
 
-    // Before the HLS decision: the mp4 is final either way, so a large video gets its
-    // poster now rather than after a transcode that can take an hour.
-    if (media.type === 'video') await generateThumbnail(job.id, media.ext);
+        // Relocate the moov atom before the file is ever served. `contentHash` is
+        // deliberately taken from the original download above, so dedup keys stay
+        // stable across this rewrite.
+        await faststartStored(media.type, job.id, media.ext, localPath);
+
+        // Before the HLS decision: the mp4 is final either way, so a large video gets its
+        // poster now rather than after a transcode that can take an hour.
+        await generateThumbnail(job.id, media.ext, localPath);
+
+        await publishLocal(media.type, job.id, media.ext);
+      } finally {
+        await cleanupLocal(job.id, media.ext);
+      }
+    } else {
+      await save(media.type, job.id, media.ext, media.buffer);
+    }
 
     const needsHls = media.type === 'video' && media.size > HLS_SIZE_THRESHOLD;
     await updateReady(job.id, {
@@ -119,10 +133,15 @@ export function startWorker() {
     }
   }
 
-  poll().catch(err => {
-    console.error('[worker] Fatal:', err);
-    running = false;
-  });
+  // Awaited before the loop starts: a job could otherwise write into the staging dir
+  // before this finishes clearing it, and lose that write.
+  resetLocalStaging()
+    .catch(err => console.error('[worker] Failed to prep local staging dir:', err.message))
+    .then(() => poll())
+    .catch(err => {
+      console.error('[worker] Fatal:', err);
+      running = false;
+    });
 }
 
 export function stopWorker() {

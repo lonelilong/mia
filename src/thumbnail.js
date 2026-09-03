@@ -22,8 +22,8 @@ const execFileAsync = promisify(execFile);
  * Best-effort — a video with no poster is still perfectly usable, so failures are logged
  * and swallowed rather than blocking the file from becoming ready.
  */
-export async function generateThumbnail(videoId, ext) {
-  const src = getPath('video', videoId, ext);
+export async function generateThumbnail(videoId, ext, srcPath) {
+  const src = srcPath || getPath('video', videoId, ext);
   const thumbId = nanoid();
   const dest = getPath('photo', thumbId, 'jpg');
 

@@ -22,6 +22,42 @@ export async function save(type, id, ext, buffer) {
   return fp;
 }
 
+// Unlike videos/images, this is NOT NFS-mounted — plain local disk under DATA_DIR. A
+// downloaded video lands here first so faststart's remux and the thumbnail's frame grab
+// both run against local disk instead of round-tripping the whole file over NFS twice.
+function localStagingPath(id, ext) {
+  return path.join(getDataDir(), 'tmp-ingest', `${id}.${ext}`);
+}
+
+export async function saveLocal(id, ext, buffer) {
+  const fp = localStagingPath(id, ext);
+  await fs.mkdir(path.dirname(fp), { recursive: true });
+  await fs.writeFile(fp, buffer);
+  return fp;
+}
+
+// Only now does the file cross the network — one bulk copy of the finished result,
+// instead of the write+read+write it would take to process it in place on NFS.
+export async function publishLocal(type, id, ext) {
+  const src = localStagingPath(id, ext);
+  const dest = filePath(type, id, ext);
+  await fs.mkdir(path.dirname(dest), { recursive: true });
+  await fs.copyFile(src, dest);
+  return dest;
+}
+
+export async function cleanupLocal(id, ext) {
+  await fs.rm(localStagingPath(id, ext), { force: true }).catch(() => {});
+}
+
+// Wipes leftovers from a prior crash/restart mid-job — nothing here is authoritative, the
+// original download can simply be retried.
+export async function resetLocalStaging() {
+  const dir = path.join(getDataDir(), 'tmp-ingest');
+  await fs.rm(dir, { recursive: true, force: true }).catch(() => {});
+  await fs.mkdir(dir, { recursive: true });
+}
+
 export async function read(type, id, ext) {
   const fp = filePath(type, id, ext);
   try {

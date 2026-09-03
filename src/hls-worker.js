@@ -8,6 +8,11 @@ import { getPath } from './storage.js';
 const execFileAsync = promisify(execFile);
 // Absolute: hlsDir() feeds res.sendFile, which rejects relative paths.
 const DATA_DIR = path.resolve(process.env.DATA_DIR || '/data');
+// Unlike images/videos/hls, this is NOT NFS-mounted — it's plain local disk. Every read
+// and write ffmpeg does during the transcode itself lands here instead of over the network,
+// where per-operation latency (not bandwidth) was the actual bottleneck. Only the source
+// copy in and the finished output copy out cross the network, as two bulk transfers.
+const LOCAL_STAGING_DIR = path.join(DATA_DIR, 'tmp-transcode');
 const POLL_INTERVAL = 5000;
 const SEGMENT_SECONDS = 3;
 // Probing over NFS occasionally takes longer than 10s for large files, especially under
@@ -64,41 +69,51 @@ function transcodeBudgetMs(durationSeconds, needsReencode) {
 }
 
 async function transcode(job) {
-  const src = getPath('video', job.id, job.ext);
+  const remoteSrc = getPath('video', job.id, job.ext);
   const outDir = hlsDir(job.id);
-  await fs.mkdir(outDir, { recursive: true });
 
-  const playlist = path.join(outDir, 'index.m3u8');
-
-  const codec = await probeCodec(src);
-  const needsReencode = codec !== 'h264';
-  const duration = await probeDuration(src);
-  const budgetMs = transcodeBudgetMs(duration, needsReencode);
-
-  console.log(`[hls] Transcoding ${job.id} (${(job.size / 1048576).toFixed(1)} MB) codec=${codec} reencode=${needsReencode} duration=${duration.toFixed(0)}s budget=${(budgetMs / 60000).toFixed(0)}min`);
-
-  // Short segments start faster: the player only has to pull one segment
-  // before it can begin playing, which dominates startup latency for
-  // short-form video. When re-encoding we can force keyframes to match;
-  // with -c:v copy segments still land on the source's existing keyframes.
-  const videoArgs = needsReencode
-    ? ['-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
-       '-force_key_frames', `expr:gte(t,n_forced*${SEGMENT_SECONDS})`]
-    : ['-c:v', 'copy'];
+  const localSrc = path.join(LOCAL_STAGING_DIR, `${job.id}.${job.ext}`);
+  const localOutDir = path.join(LOCAL_STAGING_DIR, job.id);
 
   try {
+    await fs.mkdir(localOutDir, { recursive: true });
+    await fs.copyFile(remoteSrc, localSrc);
+
+    const playlist = path.join(localOutDir, 'index.m3u8');
+
+    const codec = await probeCodec(localSrc);
+    const needsReencode = codec !== 'h264';
+    const duration = await probeDuration(localSrc);
+    const budgetMs = transcodeBudgetMs(duration, needsReencode);
+
+    console.log(`[hls] Transcoding ${job.id} (${(job.size / 1048576).toFixed(1)} MB) codec=${codec} reencode=${needsReencode} duration=${duration.toFixed(0)}s budget=${(budgetMs / 60000).toFixed(0)}min`);
+
+    // Short segments start faster: the player only has to pull one segment
+    // before it can begin playing, which dominates startup latency for
+    // short-form video. When re-encoding we can force keyframes to match;
+    // with -c:v copy segments still land on the source's existing keyframes.
+    const videoArgs = needsReencode
+      ? ['-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
+         '-force_key_frames', `expr:gte(t,n_forced*${SEGMENT_SECONDS})`]
+      : ['-c:v', 'copy'];
+
     await execFileAsync('ffmpeg', [
-      '-i', src,
+      '-i', localSrc,
       ...videoArgs,
       '-c:a', 'aac',
       '-start_number', '0',
       '-hls_time', String(SEGMENT_SECONDS),
       '-hls_list_size', '0',
-      '-hls_segment_filename', path.join(outDir, 'seg%03d.ts'),
+      '-hls_segment_filename', path.join(localOutDir, 'seg%03d.ts'),
       '-f', 'hls',
       '-y',
       playlist,
     ], { timeout: budgetMs, maxBuffer: 1024 * 1024 });
+
+    // Only now does anything cross the network again — one bulk copy of the finished
+    // output, instead of one NFS round-trip per segment during the encode itself.
+    await fs.mkdir(outDir, { recursive: true });
+    await fs.cp(localOutDir, outDir, { recursive: true });
 
     await updateHlsReady(job.id);
     console.log(`[hls] ${job.id} ready (with HLS)`);
@@ -106,8 +121,10 @@ async function transcode(job) {
     // Not promoted to 'ready': videos this large are HLS-only, so without a playlist
     // there is nothing servable. The mp4 stays on disk for a retry.
     console.error(`[hls] ${job.id} HLS failed, held unserved:`, err.message.slice(0, 200));
-    await updateHlsFailed(job.id, `HLS: ${err.message}`.slice(0, 2000));
-    await fs.rm(outDir, { recursive: true, force: true }).catch(() => {});
+    await updateHlsFailed(job.id, `HLS: ${err.message}`.slice(0, 2000)).catch(() => {});
+  } finally {
+    await fs.rm(localSrc, { force: true }).catch(() => {});
+    await fs.rm(localOutDir, { recursive: true, force: true }).catch(() => {});
   }
 }
 
@@ -127,10 +144,17 @@ export function startHlsWorker() {
     }
   }
 
-  poll().catch(err => {
-    console.error('[hls] Fatal:', err);
-    running = false;
-  });
+  // Awaited before the loop starts: a job could otherwise write into the staging dir
+  // before this finishes clearing it, and lose that write. Nothing here is authoritative —
+  // the source of truth is always the remote copy or the 'transcoding' row for retry.
+  fs.rm(LOCAL_STAGING_DIR, { recursive: true, force: true })
+    .then(() => fs.mkdir(LOCAL_STAGING_DIR, { recursive: true }))
+    .catch(err => console.error('[hls] Failed to prep local staging dir:', err.message))
+    .then(() => poll())
+    .catch(err => {
+      console.error('[hls] Fatal:', err);
+      running = false;
+    });
 }
 
 export function stopHlsWorker() {
