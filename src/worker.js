@@ -104,6 +104,12 @@ export function startWorker() {
 
   async function poll() {
     while (running) {
+      // A live toggle (env change + `docker compose up -d`, no rebuild) to free up NFS
+      // bandwidth for the transcode worker without touching downloads already in flight.
+      if (process.env.PAUSE_DOWNLOADS === 'true') {
+        await new Promise(r => setTimeout(r, POLL_INTERVAL));
+        continue;
+      }
       const jobs = await getQueued(1);
       if (jobs.length) {
         await processJob(jobs[0]);
