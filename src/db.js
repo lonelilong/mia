@@ -194,7 +194,6 @@ export async function requeueAll() {
 export async function getQueued(limit = 10) {
   const r = await client.execute({
     sql: `SELECT * FROM media WHERE status = 'queued' ORDER BY
-      priority DESC,
       CASE
         WHEN type = 'photo' OR (type IS NOT NULL AND type != 'video') THEN 0
         WHEN type = 'video' AND size <= 104857600 THEN 1
@@ -202,6 +201,7 @@ export async function getQueued(limit = 10) {
         WHEN type = 'video' AND size > 209715200 THEN 3
         ELSE 4
       END,
+      priority DESC,
       created_at ASC
       LIMIT ?`,
     args: [limit],
