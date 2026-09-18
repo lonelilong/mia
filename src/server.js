@@ -225,7 +225,11 @@ app.post('/fetch-batch', requireAuth, async (req, res) => {
         // background polling must see the true terminal status, or chigua's attempt
         // counter never fires and re-requests it forever — this masking is exactly
         // what caused an infinite retry loop before force existed here.
-        if (force && existing.status === 'failed') await requeue(existing.id);
+        //
+        // 'too_large' needs the same force-bypass /fetch already has — without passing
+        // { force } through, requeue() clears the status but never sets force=1, so
+        // telegram.js's size check rejects it again immediately.
+        if (force && (existing.status === 'failed' || existing.status === 'too_large')) await requeue(existing.id, { force });
         else if (force && existing.status === 'hls_failed') await requeueOneHlsFailed(existing.id);
         // A still-queued/transcoding row can be promoted even without force — this
         // only changes which job gets picked next, never interrupts one in progress.
@@ -233,7 +237,7 @@ app.post('/fetch-batch', requireAuth, async (req, res) => {
         results.push({
           ready: false,
           id: existing.id,
-          status: force && existing.status === 'failed' ? 'queued'
+          status: force && (existing.status === 'failed' || existing.status === 'too_large') ? 'queued'
             : force && existing.status === 'hls_failed' ? 'transcoding'
             : existing.status,
           channel, message_id,
