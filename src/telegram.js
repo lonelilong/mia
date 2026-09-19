@@ -1,6 +1,9 @@
 import { TelegramClient } from 'telegram';
 import { StringSession } from 'telegram/sessions/index.js';
 import { Logger } from 'telegram/extensions/Logger.js';
+import fs from 'fs/promises';
+import path from 'path';
+import { localStagingPath } from './storage.js';
 
 class QuietLogger extends Logger {
   error(msg) {
@@ -59,7 +62,7 @@ function parseMediaMeta(msg) {
   return null;
 }
 
-export async function fetchMedia(channel, messageId, { force = false } = {}) {
+export async function fetchMedia(channel, messageId, { force = false, id } = {}) {
   const tg = await connect();
 
   const entity = await tg.getEntity(channel);
@@ -83,8 +86,18 @@ export async function fetchMedia(channel, messageId, { force = false } = {}) {
   const timeoutPromise = new Promise((_, reject) =>
     setTimeout(() => reject(new Error(`Telegram download timed out (${Math.round(dlTimeout / 1000)}s for ${sizeMb.toFixed(1)}MB)`)), dlTimeout));
 
+  // Videos stream straight to the local staging path GramJS writes each chunk to disk and
+  // discards it immediately, instead of its default behaviour of accumulating every chunk
+  // in memory and concatenating them at the end — which briefly holds ~2x the file's size
+  // in RAM right as the download finishes. A large-enough video (observed: a 1.5GB file
+  // reaching ~3.6GB RSS) gets OOM-killed by the host right at that peak. Photos stay
+  // buffered in memory; they're never large enough for this to matter.
+  const destPath = type === 'video' && id ? localStagingPath(id, ext) : null;
+  if (destPath) await fs.mkdir(path.dirname(destPath), { recursive: true });
+
   let lastLog = 0;
   const downloadPromise = tg.downloadMedia(msg, {
+    outputFile: destPath ?? undefined,
     progressCallback: (downloaded, total) => {
       const now = Date.now();
       if (now - lastLog < 3000) return;
@@ -96,10 +109,15 @@ export async function fetchMedia(channel, messageId, { force = false } = {}) {
     },
   });
 
-  const buffer = await Promise.race([downloadPromise, timeoutPromise]);
-  if (!buffer) return null;
+  const result = await Promise.race([downloadPromise, timeoutPromise]);
+  if (!result) return null;
 
-  return { buffer: Buffer.from(buffer), type, ext, mime, size: buffer.length };
+  if (destPath) {
+    // GramJS resolves the writer's own path when given a string outputFile, rather than
+    // returning the bytes — the download's peak memory is a single chunk, not the file.
+    return { filePath: destPath, type, ext, mime, size };
+  }
+  return { buffer: Buffer.from(result), type, ext, mime, size: result.length };
 }
 
 export { EXT_TO_MIME };

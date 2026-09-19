@@ -25,7 +25,8 @@ export async function save(type, id, ext, buffer) {
 // Unlike videos/images, this is NOT NFS-mounted — plain local disk under DATA_DIR. A
 // downloaded video lands here first so faststart's remux and the thumbnail's frame grab
 // both run against local disk instead of round-tripping the whole file over NFS twice.
-function localStagingPath(id, ext) {
+// Exported so telegram.js can stream a download straight to this path.
+export function localStagingPath(id, ext) {
   return path.join(getDataDir(), 'tmp-ingest', `${id}.${ext}`);
 }
 
@@ -73,4 +74,18 @@ export function getPath(type, id, ext) {
 
 export function contentHash(buffer) {
   return crypto.createHash('sha256').update(buffer).digest('hex');
+}
+
+// Streamed rather than fs.readFile — a large video already avoided being buffered whole
+// in memory during download, so hashing it the same way it was written keeps that
+// guarantee instead of undoing it right afterward.
+export async function contentHashFile(path) {
+  const { createReadStream } = await import('fs');
+  return new Promise((resolve, reject) => {
+    const hash = crypto.createHash('sha256');
+    const stream = createReadStream(path);
+    stream.on('data', chunk => hash.update(chunk));
+    stream.on('end', () => resolve(hash.digest('hex')));
+    stream.on('error', reject);
+  });
 }

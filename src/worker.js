@@ -1,5 +1,5 @@
 import { getQueued, updateReady, updateFailed, findByContentHash, HLS_SIZE_THRESHOLD } from './db.js';
-import { save, saveLocal, publishLocal, cleanupLocal, resetLocalStaging, contentHash } from './storage.js';
+import { save, publishLocal, cleanupLocal, resetLocalStaging, contentHash, contentHashFile } from './storage.js';
 import { faststartStored } from './faststart.js';
 import { fetchMedia } from './telegram.js';
 import { generateThumbnail } from './thumbnail.js';
@@ -46,13 +46,16 @@ function serializedFetch(channel, messageId, opts) {
 async function processJob(job) {
   console.log(`[worker] Processing ${job.id} (${job.tg_channel}/${job.tg_message_id})`);
   try {
-    const media = await serializedFetch(job.tg_channel, job.tg_message_id, { force: !!job.force });
+    const media = await serializedFetch(job.tg_channel, job.tg_message_id, { force: !!job.force, id: job.id });
     if (!media) {
       await updateFailed(job.id, 'Media not found on Telegram');
       return;
     }
 
-    const hash = contentHash(media.buffer);
+    // A video was streamed straight to its staging path (see telegram.js) rather than
+    // buffered in memory, so it's hashed from disk instead of from a buffer that no
+    // longer exists.
+    const hash = media.filePath ? await contentHashFile(media.filePath) : contentHash(media.buffer);
 
     // Dedup by content
     const dupe = await findByContentHash(hash);
@@ -60,6 +63,7 @@ async function processJob(job) {
       // No file is written for this row — the bytes are already on disk under dupe.id —
       // so record where they live. Everything that builds or serves a URL resolves this,
       // which is what stops the row pointing at a file that does not exist.
+      if (media.filePath) await cleanupLocal(job.id, media.ext);
       await updateReady(job.id, {
         type: media.type, ext: dupe.ext,
         contentHash: hash, size: media.size, mimeType: media.mime,
@@ -74,8 +78,10 @@ async function processJob(job) {
       // Staged locally rather than written straight to NFS: faststart's remux and the
       // thumbnail's frame grab both need to read the file back, and running that against
       // local disk instead avoids reading and writing the whole video over NFS twice more.
+      // The download already landed here directly (telegram.js), so there's nothing to
+      // write — just use the path it's already at.
       try {
-        const localPath = await saveLocal(job.id, media.ext, media.buffer);
+        const localPath = media.filePath;
 
         // Relocate the moov atom before the file is ever served. `contentHash` is
         // deliberately taken from the original download above, so dedup keys stay
